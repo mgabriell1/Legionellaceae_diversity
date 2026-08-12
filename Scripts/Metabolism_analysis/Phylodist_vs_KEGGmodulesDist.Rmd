@@ -1,0 +1,119 @@
+---
+title: "Phylogenetic vs metabolic distance"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ape)
+library(broom)
+library(zoo)
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, species_info, isolated, genus_cluster, genus_cluster_literature)
+
+tree <- read.tree(paste0(data_dir,"/phylogeneticTrees/Legionellaceae_Legionome.supermatrix.treefile"))#msa_softcore_protein_withOutgroup_Concatenator/iTOL_figure/Legionome_metadata_tree_rooted.treefile"))
+
+KEGGmodules_pca_res <- read_tsv(paste0(data_dir, "DRAM_results_analysis/legionomePangenome_KEGG_modules_PCA_coords.tsv"))
+```
+
+```{r}
+phylodist <- as_tibble(cophenetic.phylo(tree)) %>% 
+  mutate(query = row.names(cophenetic.phylo(tree))) %>% 
+  pivot_longer(-query, values_to = "phylodist", names_to = "target") %>% 
+  filter(!(str_detect(query, "faa") | str_detect(target, "faa"))) %>% 
+  mutate(query = gsub("'","",query),
+         target = gsub("'","",target))
+
+KEGGmodules_df <- KEGGmodules_pca_res %>% select(starts_with("M")) %>% as.data.frame()
+rownames(KEGGmodules_df) <- KEGGmodules_pca_res$legio_id
+
+KEGGmodules_dist <- dist(KEGGmodules_df)
+KEGGmodules_dist_tbl <- broom::tidy(KEGGmodules_dist) %>% dplyr::rename(query = item1, target = item2) %>% mutate(query = as.character(query), target = as.character(target))
+```
+
+```{r}
+dists <- KEGGmodules_dist_tbl %>% left_join(phylodist) %>% 
+  left_join(metadata_red %>% dplyr::select(legio_id, genomovar_cluster, tax_short, species_info, genus_cluster) %>% dplyr::rename(query = legio_id, strain_cluster_query = genomovar_cluster, tax_short_query = tax_short, species_info_query = species_info, genus_cluster_query = genus_cluster)) %>% 
+  left_join(metadata_red %>% dplyr::select(legio_id, genomovar_cluster, tax_short, species_info, genus_cluster) %>% dplyr::rename(target = legio_id, strain_cluster_target = genomovar_cluster, tax_short_target = tax_short, species_info_target = species_info, genus_cluster_target = genus_cluster))
+
+dists %>% 
+  ggplot(aes(phylodist, distance)) +
+  geom_point() #+ 
+  #scale_x_log10()
+
+cor.test(dists$distance, dists$phylodist)
+
+dists %>% filter((phylodist > 0.1 & phylodist < 0.15) & distance < 1.5) %>% view()
+```
+
+```{r}
+dists_roll <- dists %>% arrange(phylodist) %>% mutate(roll_distance_sd = rollapply(distance, 50, sd, fill = NA)) %>% select(phylodist, roll_distance_sd) 
+
+dists_roll %>% 
+  ggplot() +
+  geom_point(aes(phylodist, roll_distance_sd))
+
+cor.test(dists_roll$phylodist, dists_roll$roll_distance_sd)
+# Width of curve does not change wih phylodist which mean that the variability of metabolic potential differences does not change with phylogenetic diversity
+```
+
+```{r}
+fit <- lm(distance ~ phylodist, data = dists)
+seg.fit <- selgmented(fit, Kmax = 4, type = "bic")
+summary(seg.fit)
+plot(seg.fit)
+
+hc <- hclust(as.dist(cophenetic.phylo(tree)))
+plot(hc)
+metab_clusters <- cutree(hc, h = 0.028)
+
+metadata_red_metab <- metadata_red %>% left_join(tibble(legio_id = names(metab_clusters), metab_clusters))
+
+fossil::adj.rand.index(metadata_red_metab$genus_cluster, metadata_red_metab$metab_clusters)
+fossil::adj.rand.index(metadata_red_metab$genus_cluster_literature, metadata_red_metab$metab_clusters)
+```
+
+
+```{r}
+
+aai_files <- list.files(paste0(data_dir,"legionome_ANI_AAI/AAI/"), pattern = ".txt", full.names = TRUE)
+aai <- read_tsv(aai_files)
+aai <- aai %>% mutate(AAI_value = as.numeric(gsub(">|%","",AAI_estimate)),
+                      legioid_ref = word(target, 1, sep = "_"),
+                      legioid_query = word(query, 1, sep = "_"))
+
+#
+aai_filtr <- aai %>% dplyr::select(legioid_ref,legioid_query,AAI_value)
+
+aai_mat <- aai_filtr %>% 
+  spread(legioid_query, AAI_value, fill=0) %>% 
+  column_to_rownames(var="legioid_ref") %>% 
+  as.matrix
+
+aai_dist <- as.dist(100-aai_mat)
+aai_clust <- hclust(aai_dist, method = "average")
+
+#
+aai_thresh <- seq(from = 1,to = 50, by = 1)
+phylodist_metabolic_aai_concordance <- c()
+
+for (i in aai_thresh){
+  cluster <- cutree(aai_clust, h = i)
+
+  cluster_tbl <- tibble(legio_id = names(cluster), aai_cluster = cluster)
+  metadata_tmp <- metadata_red_metab %>% left_join(cluster_tbl)
+  
+  concordance_tmp <-  fossil::adj.rand.index(as.numeric(metadata_tmp$aai_cluster),as.numeric(as.factor(metadata_tmp$metab_clusters)))
+  phylodist_metabolic_aai_concordance <- c(phylodist_metabolic_aai_concordance, concordance_tmp)
+}
+
+plot(100-aai_thresh, phylodist_metabolic_aai_concordance)
+100 - aai_thresh[which(phylodist_metabolic_aai_concordance == max(phylodist_metabolic_aai_concordance))] # 77 -> best AAI threshold to approximate 0.1 phylodist threshold
+```

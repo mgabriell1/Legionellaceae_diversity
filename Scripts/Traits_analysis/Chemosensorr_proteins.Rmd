@@ -1,0 +1,205 @@
+---
+title: "Chemotaxis proteins"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(rhmmer)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv")) 
+
+chemotaxis_proteins_mist <- read_tblout(paste0(data_dir, "/Chemotaxis/Chemotaxis_Legionome_HMM.tsv"))
+chemotaxis_CheW <- read_tblout(paste0(data_dir, "/Chemotaxis/Chemotaxis_Legionome_HMM_CheW.tsv"))
+
+chemotaxis_proteins_raw <- bind_rows(chemotaxis_proteins_mist, chemotaxis_CheW)
+```
+
+```{r}
+chemotaxis_proteins <- chemotaxis_proteins_raw %>% group_by(domain_name) %>% 
+  filter(sequence_score == max(sequence_score)) %>% 
+  filter(sequence_evalue == min(sequence_evalue)) %>% #Double filter to remove proteins with multiple hits and equal bitscores
+  filter(sequence_score > 25) 
+#chemotaxis_proteins %>% summarise(n()) %>% view() # Check number of entries per protein
+```
+
+```{r}
+
+chemotaxis_proteins <- chemotaxis_proteins %>% 
+  mutate(#ACF = str_detect(query_name, "ACF"),
+         #MCP_type = ifelse(str_detect(query_name, "mcp"), word(query_name, 2, sep = "-"), NA),
+         prot_type = case_when(str_detect(query_name, "ACF") ~ query_name,
+                              str_detect(query_name, "-F") ~ word(query_name, 1, sep = "-"),
+                              TRUE ~ query_name),
+         legio_id = substr(domain_name, 1, 10),
+         prot_name = substr(domain_name, 11, 50))
+
+chemotaxis_proteins_summary <- chemotaxis_proteins %>% group_by(legio_id, query_name, prot_type) %>% summarise(n = n()) %>% left_join(metadata) %>% drop_na(strain_cluster)
+
+chemotaxis_proteins_summary %>% ggplot(aes(legio_id, n, fill = prot_type)) +
+  geom_col() + 
+  facet_wrap(~genus_cluster_bestConcordance, scales = "free_x")
+
+chemotaxis_proteins_summary %>% group_by(prot_type) %>% summarise(n = n(), n_genomes = length(unique(legio_id)))
+
+```
+
+```{r}
+chemotaxis_proteins_summary_presence <- chemotaxis_proteins_summary %>% group_by(legio_id, strain_cluster, gtdbtk.classification, genus_cluster,genus_cluster_literature) %>% 
+  summarise(proteins_present = str_to_lower(paste(unique(query_name), collapse = ","))) %>% 
+  mutate(chemosensory_all = case_when(
+    str_detect(str_to_lower(proteins_present), "chea") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chew") ~ "CheW-based",
+    str_detect(str_to_lower(proteins_present), "chea") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chev") ~ "CheV-based",
+    TRUE ~ "Not chemosensory"), # All chemosensory proteins and then proteins annotated for specific functions
+    chemosensory_flagellar = case_when(
+    str_detect(str_to_lower(proteins_present), "chea-f") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chew") ~ "CheW-based",
+    str_detect(str_to_lower(proteins_present), "chea-f") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chev") ~ "CheV-based",
+    TRUE ~ "Not chemosensory"),
+    chemosensory_acf = case_when(
+    str_detect(str_to_lower(proteins_present), "chea-acf") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chew") ~ "CheW-based",
+    str_detect(str_to_lower(proteins_present), "chea-acf") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chev") ~ "CheV-based",
+    TRUE ~ "Not chemosensory"),
+    chemosensory_tfp = case_when(
+    str_detect(str_to_lower(proteins_present), "chea-tfp") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chew") ~ "CheW-based",
+    str_detect(str_to_lower(proteins_present), "chea-tfp") & str_detect(str_to_lower(proteins_present), "mcp") & str_detect(str_to_lower(proteins_present), "chev") ~ "CheV-based",
+    TRUE ~ "Not chemosensory"))
+
+chemotaxis_proteins_summary_presence %>% pivot_longer(starts_with("chemo")) %>% 
+  ggplot(aes(genus_cluster, fill = value)) + 
+  geom_bar() +
+  facet_wrap(~name)
+
+
+chemotaxis_proteins_summary_presence %>% mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster) %>% summarise(different_chemosensory_characeristics = length(unique(chemosensory_all))) %>% 
+  filter(different_chemosensory_characeristics > 1)
+# L. feleeii has some differences among genovars as one of them is not chemosensory (no MCP)
+
+chemotaxis_proteins_summary_presence %>% mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster) %>% mutate(chemosensory_species = names(sort(-table(chemosensory_all)))[1]) %>% # Get mode chemosensory capabilities within genomes in a species
+  sample_n(1) %>% # Get one genome per species
+  group_by(chemosensory_species) %>% summarise(n = n())
+
+chemotaxis_proteins_summary_presence %>% 
+  ggplot(aes(genus_cluster, fill = chemosensory_all)) +
+  geom_bar() 
+# While CheV seem to potentially substitute CheW (https://doi.org/10.1016/j.tim.2010.07.004), however not in f__Legionellaceae as CheV was associated with MCP only in two genomes
+# even though this protein is very abundant in all genomes
+
+chemotaxis_proteins_summary_presence %>% filter(chemosensory_all == "Not chemosensory") %>% ungroup() %>% 
+  summarise(mcp_presences = sum(str_detect(proteins_present, "mcp")),
+            chea_presences = sum(str_detect(proteins_present, "chea")),
+            chew_presences = sum(str_detect(proteins_present, "chew")))
+# Lack of chemosensory ability seem to stem mostly from lack of MCP and CheW proteins as they were respectively found in 0 and 3 genomes
+
+chemotaxis_proteins_summary_presence %>% filter(genus_cluster == 1) %>% 
+  pivot_longer(starts_with("chemo")) %>% 
+  ggplot(aes(genus_cluster_literature, fill = value)) + 
+  geom_bar() +
+  facet_wrap(~name)
+
+chemotaxis_proteins_summary_presence %>% pivot_longer(starts_with("chemo")) %>% filter(value == "CheW-based") %>% group_by(name) %>% summarise(n = n())
+```
+
+## Check eggNOG annotations for other genes involved in motility regulation: RpoS, LetA/LetS, letE
+```{r}
+
+eggnog_annotations_files <- list.files(paste0(data_dir,"eggNOG_annotations/"), pattern = ".annotations$", recursive = TRUE, full.names = TRUE)
+eggnog_annotations <- read_tsv(eggnog_annotations_files, comment = "##", id = "filename")
+eggnog_annotations <- eggnog_annotations %>% mutate(legio_id = word(word(filename, 10, sep = fixed("/")), 1, sep = "_"))
+
+```
+
+```{r}
+motility_regulation_proteins <- eggnog_annotations %>% group_by(legio_id) %>% 
+  summarise(rpoS = str_detect(paste(Preferred_name, collapse = ","),"rpoS"),
+            LetA = str_detect(paste(Preferred_name, collapse = ","),"letA"),
+            LetS = str_detect(paste(Preferred_name, collapse = ","),"letS"),
+            letE = str_detect(paste(Preferred_name, collapse = ","),"letE"),
+            FliA = str_detect(paste(Preferred_name, collapse = ","),"fliA")) 
+
+chemotaxis_regulation_summary <- chemotaxis_proteins_summary_presence %>% left_join(motility_regulation_proteins)
+
+chemotaxis_regulation_summary %>% pivot_longer(c(rpoS, LetA, LetS, FliA)) %>% 
+  ggplot(aes(genus_cluster, fill = value)) + 
+  geom_bar() +
+  facet_wrap(~name)
+
+# letS eggNOG annotations are not consistent (the name is not present in homologs). look for homologues using blastp and Lp paris referene
+```
+
+```{r}
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+
+letS_prot <- readAAStringSet(paste0(data_dir,"referenceProteins/letS/Lpneumophila_paris_referenceProteins/gacS_letS.seq"))
+blastp_res_raw <- predict(db, letS_prot, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+blastp_res <- blastp_res_raw %>% mutate(Target = "letS", legio_id = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legio_id) %>% filter(qcovs >= 80 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+metadata_letS <- metadata %>% left_join(blastp_res)
+# Virtually all species have a letS gene and the ones that seem not to have it have often homologs which are borderline which thresholds set
+```
+
+```{r}
+# Test if proportion of genomes with or without LetS genomes is equal or different among chemotactic or not genomes
+chemosensory_flagellar_LetS_table <- chemotaxis_regulation_summary %>% ungroup() %>% select(chemosensory_flagellar, LetS) %>% filter(chemosensory_flagellar != "CheV-based") %>% table()
+prop.test(chemosensory_flagellar_LetS_table)
+
+chemosensory_flagellar_tfp_table <- chemotaxis_regulation_summary %>% ungroup() %>% select(chemosensory_tfp, LetS) %>% filter(chemosensory_tfp != "CheV-based") %>% table()
+prop.test(chemosensory_flagellar_tfp_table)
+
+chemotaxis_regulation_summary %>% group_by(chemosensory_tfp, LetS) %>%
+  summarise(n = n()) %>% filter(chemosensory_tfp != "CheV-based") %>%
+  mutate(LetS = ifelse(LetS, "LetS_present", "LetS_absent")) %>%
+  pivot_wider(names_from = LetS, values_from = n) %>%
+  mutate(total_genomes = LetS_present + LetS_absent,
+         proportion_present = LetS_present/total_genomes)
+
+chemosensory_all_table <- chemotaxis_regulation_summary %>% ungroup() %>% select(chemosensory_all, LetS) %>% filter(chemosensory_all != "CheV-based") %>% table()
+prop.test(chemosensory_all_table)
+
+# chemotaxis_regulation_summary %>% group_by(chemosensory_flagellar, LetS) %>% 
+#   summarise(n = n()) %>% filter(chemosensory_flagellar != "CheV-based") %>% 
+#   mutate(LetS = ifelse(LetS, "LetS_present", "LetS_absent")) %>% 
+#   pivot_wider(names_from = LetS, values_from = n) %>% 
+#   mutate(total_genomes = LetS_present + LetS_absent) %>% 
+#   rowwise() %>% 
+#   mutate(prop.test_pval = binom.test(x = LetS_present, n = total_genomes)$p.value)
+# 
+# chemotaxis_regulation_summary %>% group_by(chemosensory_tfp, LetS) %>% 
+#   summarise(n = n()) %>% filter(chemosensory_tfp != "CheV-based") %>% 
+#   mutate(LetS = ifelse(LetS, "LetS_present", "LetS_absent")) %>% 
+#   pivot_wider(names_from = LetS, values_from = n) %>% 
+#   mutate(total_genomes = LetS_present + LetS_absent) %>% 
+#   rowwise() %>% 
+#   mutate(prop.test_pval = binom.test(x = LetS_present, n = total_genomes)$p.value)
+# 
+# chemotaxis_regulation_summary %>% group_by(chemosensory_all, LetS) %>% 
+#   summarise(n = n()) %>% filter(chemosensory_all != "CheV-based") %>% 
+#   mutate(LetS = ifelse(LetS, "LetS_present", "LetS_absent")) %>% 
+#   pivot_wider(names_from = LetS, values_from = n) %>% 
+#   mutate(total_genomes = LetS_present + LetS_absent) %>% 
+#   rowwise() %>% 
+#   mutate(prop.test_pval = binom.test(x = LetS_present, n = total_genomes)$p.value)
+
+
+```
+
+```{r}
+
+chemotaxis_regulation_summary %>% mutate(chemosensory_flagellar = chemosensory_flagellar == "CheW-based",
+                                         chemosensory_acf = chemosensory_acf == "CheW-based",
+                                         chemosensory_tfp = chemosensory_tfp == "CheW-based") %>% 
+  pivot_longer(c(chemosensory_flagellar, chemosensory_acf, chemosensory_tfp, rpoS, LetA, LetS, letE, FliA)) %>% 
+  ggplot(aes(legio_id, name, fill = value)) +
+  geom_tile() +
+  facet_wrap(~genus_cluster, scales = "free_x")
+
+#write_tsv(chemotaxis_regulation_summary, paste0(data_dir, "/Chemotaxis/Chemotaxis_legioid_metadata.tsv"))
+```

@@ -1,0 +1,66 @@
+---
+title: "Seconday clustering skani"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+
+```
+
+
+```{r}
+primaryCluster_files <- list.files(path = "~/PostdocUMIK/Activities/Legionome/Data/skani_secondaryClustering_MASHprimary", pattern= ".tsv", full.names = TRUE)
+primaryClustering_MASH_summary <- read_csv("~/PostdocUMIK/Activities/Legionome/Data/skani_secondaryClustering_MASHprimary/primaryClustering_MASH_dRep_Cdb.csv")
+
+secondaryCluster_result_total <- tibble()
+for (filename in primaryCluster_files){
+  print(filename)
+  secondaryClustering_skani <- read_tsv(filename, show_col_types = FALSE)
+  primaryCluster_n <- word(word(filename, -1, sep = "/"), 3, sep = "_")
+  
+  if (nrow(secondaryClustering_skani) == 0){
+    secondaryCluster_result <- primaryClustering_MASH_summary %>% filter(primary_cluster == primaryCluster_n) %>% 
+      mutate(LegioID = word(genome, start = 1, sep = "_"), species_cluster = secondary_cluster, strain_cluster = secondary_cluster) %>% 
+      select(LegioID, species_cluster, strain_cluster) %>% mutate(ANI_mean_wrt_species_secondaryCluster = NA, ANI_mean_wrt_strain_secondaryCluster = NA)
+  }else{
+    secondaryClustering_skani <- secondaryClustering_skani %>% select(Ref_file, Query_file, ANI) %>% 
+      mutate(Ref_file = word(word(Ref_file, 2, sep = "//"), 1, sep = "_"),
+             Query_file = word(word(Query_file, 2, sep = "//"), 1, sep = "_"))
+    
+    files <- unique(c(secondaryClustering_skani$Ref_file, secondaryClustering_skani$Query_file))
+    tmp_tbl <- tibble(Ref_file = files) %>% mutate(Query_file = Ref_file, ANI = 100)
+    secondaryClustering <- secondaryClustering_skani %>% bind_rows(tmp_tbl)
+    
+    ANImat <- xtabs(ANI ~ ., secondaryClustering) 
+    ANIdist <- as.dist(t(ANImat))
+    
+    ANIclust <- hclust(100-ANIdist, method = "average")
+    #plot(ANIclust)
+    
+    species_cluster <- cutree(ANIclust, h = 5)
+    strain_cluster <- cutree(ANIclust, h = 0.5)
+    
+    secondaryCluster_result <- tibble(LegioID = names(species_cluster), species_cluster = paste0(primaryCluster_n,"_",species_cluster), strain_cluster = paste0(primaryCluster_n,"_",strain_cluster))
+    tmp_tbl <- secondaryClustering_skani %>% rename(Ref_file_tmp = Query_file) %>% rename(Query_file = Ref_file) %>% rename(Ref_file = Ref_file_tmp) %>% bind_rows(secondaryClustering_skani)
+    tmp_tbl_speciesANI <- tmp_tbl %>% mutate(LegioID_ref = word(Ref_file, 1, sep = "_"), LegioID_query = word(Query_file, 1, sep = "_")) %>% 
+      right_join(secondaryCluster_result %>% select(LegioID, species_cluster) %>% rename(LegioID_ref = LegioID, species_cluster_ref = species_cluster)) %>% 
+      right_join(secondaryCluster_result %>% select(LegioID, species_cluster) %>% rename(LegioID_query = LegioID, species_cluster_query = species_cluster)) %>% 
+      filter(species_cluster_ref == species_cluster_query) %>% group_by(LegioID_ref, species_cluster_ref) %>% summarise(ANI_mean_wrt_species_secondaryCluster = mean(ANI)) %>% 
+      rename(LegioID = LegioID_ref, species_cluster = species_cluster_ref)
+    tmp_tbl_strainANI <- tmp_tbl %>% mutate(LegioID_ref = word(Ref_file, 1, sep = "_"), LegioID_query = word(Query_file, 1, sep = "_")) %>% 
+      right_join(secondaryCluster_result %>% select(LegioID, strain_cluster) %>% rename(LegioID_ref = LegioID, strain_cluster_ref = strain_cluster)) %>% 
+      right_join(secondaryCluster_result %>% select(LegioID, strain_cluster) %>% rename(LegioID_query = LegioID, strain_cluster_query = strain_cluster)) %>% 
+      filter(strain_cluster_ref == strain_cluster_query) %>% group_by(LegioID_ref, strain_cluster_ref) %>% summarise(ANI_mean_wrt_strain_secondaryCluster = mean(ANI))%>% 
+      rename(LegioID = LegioID_ref, strain_cluster = strain_cluster_ref)
+    secondaryCluster_result <- secondaryCluster_result %>% left_join(tmp_tbl_speciesANI) %>% left_join(tmp_tbl_strainANI)
+  }
+    
+  secondaryCluster_result_total <- bind_rows(secondaryCluster_result_total, secondaryCluster_result)
+
+}
+write_tsv(secondaryCluster_result_total, "~/PostdocUMIK/Activities/Legionome/Data/secondaryCluster_total.tsv")
+
+```
+

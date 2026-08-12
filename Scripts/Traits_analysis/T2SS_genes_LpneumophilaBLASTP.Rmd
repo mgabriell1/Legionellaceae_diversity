@@ -1,0 +1,182 @@
+---
+title: "T2SS components BLASTp"
+output: html_notebook
+---
+
+Check for the detection of T2SS proteins with homology to the ones of L. pneumophila paris, used as model 
+
+```{r message=FALSE}
+library(rBLAST)
+library(Biostrings)
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r import Legionome gnomes info}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+LegioInfo_red <- LegioInfo %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, species_info, genus_cluster, checkm2.Completeness)
+
+aai_vs_Lp <- read_tsv("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/legionome_ANI_AAI/AAI_vs_Lpneumophila.tsv")
+
+txsscan_results <- read_tsv(paste0(data_dir, "/TXSScan_results/TXSScan_summary_output_tot.tsv"))
+```
+
+```{r}
+T2SS_files <- list.files(path = paste0(data_dir,"/referenceProteins/T2SS/Lpneumophila_paris_referenceProteins"), full.names = TRUE)
+legionome_protFiles <- paste0(data_dir,"/proteinFolder_legionome/legiomePangenome_allProteins.fasta")
+
+```
+
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot_raw <- tibble()
+
+for (i in 1:length(T2SS_files)){
+  SScomponent <- readAAStringSet(T2SS_files[i])
+  cat(T2SS_files[i],"\n")
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".seq","",word(T2SS_files[i], 12, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) 
+  
+  blastp_res_tot_raw <- blastp_res_tot_raw %>% bind_rows(blastp_res)
+}
+
+blastp_res_tot <- blastp_res_tot_raw %>% group_by(legioid,Target) %>% 
+  filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% # qcovs/100*pident/100 >= 0.30 strategy by brown et al. (2019) adjusted to inlcude lspC gives very comparable results on overall pident trends
+  filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+
+#write_tsv(blastp_res_tot, paste0(data_dir, "/referenceProteins/T2SS/T2SS_Lpneumophila_blastp.tsv"))
+```
+
+```{r} 
+# Look for other lspC from eggNOG
+
+eggnog_annotation_files <- list.files(paste0(data_dir, "eggNOG_annotations/"), pattern = "annotations$", recursive = TRUE, full.names = TRUE)
+eggnog_annotation <- read_tsv(eggnog_annotation_files, id = "filename", comment = "##")
+eggnog_annotation <- eggnog_annotation %>% mutate(legio_id = gsub("_eggNOG", "", word(filename, 10, sep = ("/")))) %>% select(-filename) %>% relocate(legio_id)
+
+eggnog_annotation_lspC <- eggnog_annotation %>% filter(str_detect(PFAMs, "T2SSC"))
+
+```
+
+```{r}
+blastp_res_tot <- read_tsv(paste0(data_dir, "/referenceProteins/T2SS/T2SS_Lpneumophila_blastp.tsv"))
+
+missing_lspC_annotations <- eggnog_annotation_lspC %>% filter(!(legio_id %in% (blastp_res_tot %>% filter(Target == "lspC") %>% pull(legioid))))
+missing_lspC_annotations_blastp <- missing_lspC_annotations %>% select(legio_id, `#query`) %>% dplyr::rename(legioid = legio_id, sseqid = `#query`) %>% 
+  mutate(qseqid = "eggNOG", pident = 999, bitscore = 999, evalue = 999, length = 999, qcovs = 999, Target = "lspC")
+blastp_res_tot <- blastp_res_tot %>% bind_rows(missing_lspC_annotations_blastp)
+
+blastp_res_tot_summay <- blastp_res_tot %>% group_by(legioid) %>% 
+  mutate(n_components = n()) %>% 
+  filter(pident < 999) %>% # Remove proteins added through eggNOG
+  summarise(n_components = unique(n_components), avg_pident = mean(pident))
+LegioInfo_red_blastp_summary <- LegioInfo_red %>% left_join(blastp_res_tot_summay, by = c("legio_id" = "legioid"))
+LegioInfo_red_blastp_summary <- LegioInfo_red_blastp_summary %>% left_join(aai_vs_Lp, by = c("legio_id" = "legioid_ref")) %>% 
+  group_by(genus_cluster) %>% mutate(avgGenus_AAI_vs_Lpneumophila = mean(AAI_vs_Lpneumophila))
+
+LegioInfo_red_blastp_summary %>% 
+  ggplot(aes(reorder(genus_cluster, -avgGenus_AAI_vs_Lpneumophila, mean), avg_pident, group = genus_cluster)) +
+  #geom_boxplot() +
+  geom_jitter(aes(col = AAI_vs_Lpneumophila)) +#, shape = species_info
+  labs(x = "Genus cluster", y = "Average percentage identity [%]", col = "AAI compared to <br> *L. pneumophila*") +
+  theme(axis.text.x = element_blank(), legend.title = ggtext::element_markdown())
+# Values above 90% pident are linked to L pneumophila and other genomes traditionally linked to subspecies plus 2 not named species
+
+
+LegioInfo_red_blastp_summary <- LegioInfo_red_blastp_summary %>% 
+  mutate(avg_pident = ifelse(legio_id %in% (txsscan_results %>% filter(TXSScan_T2SS == 0) %>% pull(legio_id)), NA, avg_pident)) # Remove the genomes in which TXSScan did not detect a T2SS
+#write_tsv(LegioInfo_red_blastp_summary, paste0(data_dir, "/referenceProteins/T2SS/LegioInfo_T2SS_summary.tsv"))
+
+```
+
+```{r}
+LegioInfo_red_blastp_summary %>% 
+  ggplot(aes(AAI_vs_Lpneumophila, avg_pident)) + 
+  geom_point() +
+  geom_abline(a = 0 ,b = 1) + lims(x = c(45,100), y = c(45,100))
+
+t.test(LegioInfo_red_blastp_summary$avg_pident, LegioInfo_red_blastp_summary$AAI_vs_Lpneumophila, paired = TRUE) 
+# Dot/Icm components are more conserved than the whole genome on average
+```
+
+```{r}
+blastp_res_tot_info <- blastp_res_tot %>% left_join(LegioInfo_red, by = c("legioid" = "legio_id")) 
+blastp_res_tot_info %>% 
+  ggplot(aes(Target, pident)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))#+
+  #facet_wrap(~genus_cluster_bestConcordance)
+
+
+```
+
+
+```{r}
+LegioInfo_red_blastp_summary %>% 
+  group_by(n_components) %>% 
+  summarise(n_species = length(unique(species_cluster)))
+
+allT2SS_components <- gsub(".seq","",word(T2SS_files, 12, sep = "/"))
+
+missing_T2SS_components_binary <- blastp_res_tot %>% select(legioid, Target, pident) %>% 
+  pivot_wider(names_from = Target, values_from = pident) %>% ungroup() %>% 
+  mutate(across(!legioid, function(x){ifelse(is.na(x), 0, 1)}))
+UpSetR::upset(as.data.frame(missing_T2SS_components_binary),nsets = 28, nintersects = 50)
+
+missing_T2SS_components_binary_info <- missing_T2SS_components_binary %>% 
+  mutate(Total = rowSums(select_if(., is.numeric), na.rm = TRUE)) %>% 
+  left_join(LegioInfo_red, by = c("legioid" = "legio_id"))  %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_"))
+
+missing_T2SS_components_binary_info %>% 
+  filter(Total == 12) %>% pull(species_cluster) %>% unique() %>% length()
+
+missing_T2SS_components_binary_info %>% 
+  filter(lpsC == 0 & Total == 11) %>% #view()
+  ggplot(aes(genus_cluster)) +
+  geom_bar()
+
+missing_T2SS_components_binary_info %>% 
+  group_by(genus_cluster) %>% 
+  mutate(n_species_genus = length(unique(species_cluster))) %>% 
+  filter(lpsC == 0 & Total == 11) %>%
+  summarise(n = n(),
+            n_species = length(unique(species_cluster)),
+            n_species_genus = unique(n_species_genus))
+  
+missing_T2SS_components_binary_info %>% 
+  group_by(genus_cluster) %>% 
+  mutate(n_species_genus = length(unique(species_cluster))) %>% 
+  filter(lpsC == 0) %>%
+  summarise(n = n(),
+            n_species = length(unique(species_cluster)),
+            n_species_genus = unique(n_species_genus))
+  
+# missing_T2SS_components_binary_info %>% 
+#   filter(lpsC == 0 & Total == 11) %>% pull(species_cluster) %>% unique() %>% length()
+
+missing_T2SS_components_binary %>% left_join(LegioInfo, by = c("legioid" = "legio_id")) %>% view()
+
+cor.test(LegioInfo_red_blastp_summary$n_components, LegioInfo_red_blastp_summary$checkm2.Completeness, method = "spearman")
+LegioInfo_red_blastp_summary %>% 
+  group_by(n_components) %>% 
+  summarise(n_species = length(unique(species_cluster)))
+```
+
+```{r}
+missing_T2SS_components_binary_info %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster) %>% 
+  summarise(var_proteins_number = sd(Total))
+
+```
+
+

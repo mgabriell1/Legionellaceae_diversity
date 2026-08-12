@@ -1,0 +1,52 @@
+---
+title: "Auxotrophies plotting"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+
+auxo_preds_files <- list.files(paste0(data_dir, "GSMM/gapseq_auxotrophies"), pattern = "_gapseq_auxotrophies.tsv", full.names = TRUE)
+auxo_preds <- read_tsv(auxo_preds_files)
+
+```
+
+```{r}
+
+auxo_preds <- auxo_preds %>% mutate(auxotrophy = obj_out < 1e-3)
+
+auxo_preds_info <- auxo_preds %>% left_join(LegioInfo)
+
+auxo_preds_info_summ <- auxo_preds_info %>% 
+  group_by(comp, genus_cluster) %>% 
+  summarise(perc_auxo = sum(auxotrophy)/n())
+
+auxo_preds_info_n_auxo <- auxo_preds_info %>% 
+  group_by(legio_id) %>% 
+  mutate(n_auxo = sum(auxotrophy)) %>% 
+  group_by(genus_cluster) %>% 
+  summarise(avg_n_aux = mean(n_auxo),
+            min_n_aux = min(n_auxo),
+            max_n_aux = max(n_auxo))
+
+# Order of genus clusters: 1, 17, 6, 18, 8, 13, 15, 2, 3, 12, 16, 10, 5, 14, 11, 10, 9
+auxo_preds_info_summ %>% 
+  filter((str_detect(comp, "L-") | comp == "Glycine") & !str_detect(comp, "No ")) %>% 
+  ungroup() %>% 
+  mutate(comp = str_to_sentence(comp),
+         genus_cluster = factor(genus_cluster, levels= c("1","4","17","6","5","11","3","12","16","10","15","2","13","7","8","14","9")),
+         comp = factor(comp, levels = c("L-alanine", "L-arginine", "L-asparagine", "L-aspartate","L-cysteine","L-glutamate","L-glutamine", "Glycine","L-histidine","L-isoleucine","L-leucine","L-lysine","L-methionine","L-phenylalanine","L-proline","L-serine","L-threonine","L-tryptophan","L-tyrosine","L-valine"))) %>% 
+  ggplot(aes(comp, genus_cluster, fill = perc_auxo*100)) +
+  geom_tile() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), axis.title = element_blank()) +
+  scale_fill_viridis_c() +
+  labs(fill = "Percentage \nauxotrophy")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Metabolism/Auxotrophy_gapseq_genera_percentage.pdf", dpi = 600, width = 9.25)
+```

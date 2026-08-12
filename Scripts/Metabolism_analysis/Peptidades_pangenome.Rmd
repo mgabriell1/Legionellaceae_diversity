@@ -1,0 +1,152 @@
+---
+title: "MEROPS results"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, strain_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster, genus_cluster_literature)
+
+merops_results_raw <- read_tsv(paste0(data_dir,"/merops_mmseqs_results/merops_pepunit_mmseqs_result_out.m8"))
+merops_annotations <- read_tsv(paste0(data_dir,"/merops_mmseqs_results/MEROPS_annotations.tsv"), col_names = FALSE)
+colnames(merops_annotations) <- c("target", "merops_species", "merops_description")
+
+signalp_files <- list.files(paste0(data_dir, "/signalp6_results"), full.names = TRUE)
+signalp_results <- read_tsv(signalp_files, skip = 1, id = "filename")
+
+```
+
+```{r}
+signalp_results <- signalp_results %>% 
+  mutate(legioid = word(word(filename, 10, sep = "/"), 1, sep = "_"),
+         query = paste0(legioid, "_", word(`# ID`, 1)),
+         signal_pep = ifelse(Prediction == "OTHER", FALSE, TRUE))
+  
+merops_results <- merops_results_raw %>% filter(qcov >= 0.65 & bits > 50 & evalue < 1e-10 & pident > 50) # as in 10.1186/s40168-021-01213-8
+merops_results <- merops_results %>% left_join(merops_annotations) %>% left_join(signalp_results %>% select(query, signal_pep)) %>% 
+  mutate(legio_id = word(query, 1, sep = "_"), merops_family = word(merops_species, 1, sep = fixed("."))) %>% 
+  filter(!str_detect(merops_family, "I") & !str_detect(merops_description, "non-peptidase hom")) # remove inhibitors and non-peptidase homologues
+
+merops_results_bh <- merops_results %>% group_by(query) %>% 
+  filter(bits == max(bits)) %>% 
+  slice_sample(n = 1) #%>% summarise(n_matches = n(), n_species = length(unique(merops_species)))
+```
+
+```{r}
+merops_results_bh_info <- merops_results_bh %>% left_join(metadata_red)
+
+merops_results_bh_info_summ <- merops_results_bh_info %>% 
+  group_by(legio_id, genus_cluster, isolated, signal_pep) %>% 
+  summarise(n_pep = n(), n_merops_species = length(unique(merops_species))) 
+merops_results_bh_info_summ%>% 
+  ggplot(aes(as.factor(genus_cluster), n_pep, fill = signal_pep)) +
+  geom_boxplot()
+merops_results_bh_info_summ%>% 
+  ggplot(aes(as.factor(genus_cluster), n_merops_species, fill = signal_pep)) +
+  geom_boxplot()
+
+merops_results_bh_info_summ %>% left_join(metadata_red) %>% 
+  write_tsv(paste0(data_dir,"/merops_mmseqs_results/LegioInfo_MEROPS.tsv"))
+
+merops_results_bh_info_summ %>% 
+  group_by(legio_id, genus_cluster, isolated) %>% summarise(n_pep = sum(n_pep)) %>% 
+  ggplot(aes(as.factor(genus_cluster), n_pep, fill = isolated)) +
+  geom_boxplot()
+
+merops_results_bh_info_summ %>% 
+  group_by(legio_id, genus_cluster, isolated) %>% summarise(n_pep = sum(n_pep)) %>% 
+  group_by(genus_cluster) %>% 
+  filter(genus_cluster %in% c(1,6,13)) %>% 
+  rstatix::t_test(n_pep ~ isolated)
+# Number of peptidases affected by MAG vs isolated in 2 out of 3 genera
+
+merops_results_bh_info_summ %>% 
+  group_by(legio_id, genus_cluster, isolated) %>% summarise(n_pep = sum(n_pep)) %>% 
+  ungroup() %>% 
+  filter(isolated) %>% 
+  filter(genus_cluster %in% c(1,6,13)) %>% 
+  rstatix::anova_test(n_pep ~ genus_cluster)
+# Genus impacts number of peptidades per genome
+```
+
+```{r}
+# Beta diversity rarefying the number of peptidades to a common value
+merops_results_bh_mat_rarefTot <- merops_results_bh_info %>% 
+  filter(!signal_pep) %>% 
+  group_by(legio_id) %>% 
+  mutate(n_pep_per_cluster =  n()) %>% 
+  filter(n_pep_per_cluster > 19) %>% 
+  sample_n(20) %>%  # merops_results_bh_info_summ %>% group_by(legio_id, genus_cluster, isolated) %>% summarise(n_pep = sum(n_pep)) %>% pull(n_pep) %>% min() == 13
+  group_by(legio_id, merops_family) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = merops_family, values_from = n)
+merops_results_bh_mat_rarefTot[is.na(merops_results_bh_mat_rarefTot)] <- 0
+
+row_names_rarefTot <- merops_results_bh_mat_rarefTot$legio_id
+merops_results_bh_mat_rarefTot <- as.data.frame(merops_results_bh_mat_rarefTot %>% ungroup()%>% select(-legio_id))
+rownames(merops_results_bh_mat_rarefTot) <- row_names_rarefTot
+merops_results_bh_dist_rarefTot <- vegan::vegdist(merops_results_bh_mat_rarefTot)
+              
+mds_rarefTot <- vegan::metaMDS(merops_results_bh_dist_rarefTot, trymax = 100, k = 4)        
+# Very high stress even with 4 dimensions!
+mds_rarefTot_tbl <- as_tibble(mds_rarefTot$points) %>% mutate(legio_id = rownames(mds_rarefTot$points)) %>% left_join(metadata_red)
+# ggplot(mds_rarefTot_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+#   theme_void() +
+#   axes_3D() + 
+#   stat_3D()
+
+vegan::anosim(merops_results_bh_dist_rarefTot, mds_rarefTot_tbl %>% pull(genus_cluster))
+# weak significant differences for species info, while no for genus_cluster and isolated (see here though: https://github.com/vegandevs/vegan/discussions/586)
+vegan::adonis2(merops_results_bh_dist_rarefTot ~ as.factor(genus_cluster) + isolated, data = mds_rarefTot_tbl)
+# signicant terms for both genus_cluster and isolated and also their interaction
+```
+
+```{r}
+# Beta diversity rarefying the number of peptidades to a common value
+merops_results_bh_mat_signalp_rarefTot <- merops_results_bh_info %>% 
+  filter(signal_pep) %>% 
+  group_by(legio_id) %>% 
+  mutate(n_pep_per_cluster =  n()) %>% 
+  filter(n_pep_per_cluster > 10) %>% 
+  sample_n(11) %>% 
+  group_by(legio_id, merops_family) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = merops_family, values_from = n)
+merops_results_bh_mat_signalp_rarefTot[is.na(merops_results_bh_mat_signalp_rarefTot)] <- 0
+
+row_names_rarefTot <- merops_results_bh_mat_signalp_rarefTot$legio_id
+merops_results_bh_mat_signalp_rarefTot <- as.data.frame(merops_results_bh_mat_signalp_rarefTot %>% ungroup()%>% select(-legio_id))
+rownames(merops_results_bh_mat_signalp_rarefTot) <- row_names_rarefTot
+merops_results_bh_dist_signalp_rarefTot <- vegan::vegdist(merops_results_bh_mat_signalp_rarefTot)
+              
+mds_signalp_rarefTot <- vegan::metaMDS(merops_results_bh_dist_signalp_rarefTot, trymax = 100, k = 4)        
+# Very high stress even with 4 dimensions!
+mds_signalp_rarefTot_tbl <- as_tibble(mds_signalp_rarefTot$points) %>% mutate(legio_id = rownames(mds_signalp_rarefTot$points)) %>% left_join(metadata_red)
+# ggplot(mds_rarefTot_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+#   theme_void() +
+#   axes_3D() + 
+#   stat_3D()
+
+vegan::anosim(merops_results_bh_dist_signalp_rarefTot, mds_signalp_rarefTot_tbl %>% pull(genus_cluster))
+# weak significant differences for species info, while no for genus_cluster and isolated (see here though: https://github.com/vegandevs/vegan/discussions/586)
+vegan::adonis2(merops_results_bh_dist_signalp_rarefTot ~ as.factor(genus_cluster) + isolated, data = mds_signalp_rarefTot_tbl)
+# signicant terms for both genus_cluster and isolated and also their interaction
+```
+
+```{r}
+
+
+
+merops_results_bh_dist_rarefTot_reduced <- usedist::dist_subset(merops_results_bh_dist_rarefTot, rownames(merops_results_bh_mat_signalp_rarefTot))
+plot(merops_results_bh_dist_rarefTot_reduced, merops_results_bh_dist_signalp_rarefTot)
+vegan::mantel(merops_results_bh_dist_rarefTot_reduced, merops_results_bh_dist_signalp_rarefTot)
+
+```

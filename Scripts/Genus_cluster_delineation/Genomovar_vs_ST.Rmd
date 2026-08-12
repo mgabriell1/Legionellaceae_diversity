@@ -1,0 +1,134 @@
+---
+title: "Lpneumophila ST vs genomovars"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(flexclust)
+library(MetBrewer)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LpST <- read_tsv(paste0(data_dir, "/Lpneumophila_typing/Legionome_LpST_ONTmompS.tsv"))
+LpST <- LpST %>% mutate(legio_id = substr(Strain, 0, 10))
+
+ANI_clustering <- read_tsv(paste0(data_dir, "secondaryCluster_total.tsv")) %>% dplyr::rename(legio_id = LegioID)
+
+ANI_mashCluster_42 <- read_tsv(paste0(data_dir,"/skani_secondaryClustering_MASHprimary/secondaryClustering_skani_42_primaryMASHcluster.tsv"))
+ANI_mashCluster_42 <- ANI_mashCluster_42 %>% 
+  mutate(Ref_legio_id = substring(Ref_file, 24, 33),
+         Query_legio_id = substring(Query_file, 24, 33))
+```
+
+```{r}
+ANI_clustering_Lp <- ANI_clustering %>% filter(species_cluster == "42_1")
+
+ANI_clustering_Lp_ST <- ANI_clustering_Lp %>% left_join(LpST) %>% filter(!is.na(Strain)) %>% 
+  group_by(Strain) %>% 
+  mutate(allelesComb = paste0(c(flaA, pilE, asd, mip, mompS, proA, neuA), collapse = "." ))
+```
+```{r}
+length(unique(LpST$ST)) # 489 STs vs 213 genomovar
+randIndex(factor(ANI_clustering_Lp_ST$strain_cluster), factor(ANI_clustering_Lp_ST$ST)) # adj rand index = 0.59
+randIndex(factor(ANI_clustering_Lp_ST$strain_cluster), factor(ANI_clustering_Lp_ST$allelesComb))
+randIndex(factor(ANI_clustering_Lp_ST$ST), factor(ANI_clustering_Lp_ST$allelesComb))
+
+ST_per_genomovar <- ANI_clustering_Lp_ST %>% 
+  group_by(strain_cluster) %>% 
+  summarise(n_genomes = n(),
+            n_ST = length(unique(ST)))
+
+ST_per_genomovar %>% 
+  ggplot(aes(n_genomes, n_ST)) +
+  geom_point() +
+  scale_x_sqrt()
+ST_per_genomovar %>% 
+  ggplot(aes(n_ST)) +
+  geom_histogram() +
+  scale_x_sqrt()
+
+length(ST_per_genomovar$n_ST[ST_per_genomovar$n_ST == 1])/nrow(ST_per_genomovar) # 58% of genomovars contain only one ST
+length(ST_per_genomovar$n_ST[ST_per_genomovar$n_ST == 1 & ST_per_genomovar$n_genomes > 1])/length(ST_per_genomovar$n_genomes[ST_per_genomovar$n_genomes > 1]) # Considering the genomovars with more than one genome only 26% have only one ST
+
+##
+genomovar_per_ST <- ANI_clustering_Lp_ST %>% 
+  group_by(ST) %>% 
+  summarise(n_genomes = n(),
+            n_genomovar = length(unique(strain_cluster)),
+            genomovar_list = paste0(unique(strain_cluster), collapse = ","))
+
+genomovar_per_ST %>% 
+  ggplot(aes(n_genomovar)) +
+  geom_histogram() +
+  scale_x_sqrt()
+
+
+length(genomovar_per_ST$n_genomovar[genomovar_per_ST$n_genomovar == 1])/nrow(genomovar_per_ST) # 90% of genomovars contain only one ST
+length(genomovar_per_ST$n_genomovar[genomovar_per_ST$n_genomovar == 1 & genomovar_per_ST$n_genomes > 1])/length(genomovar_per_ST$n_genomes[genomovar_per_ST$n_genomes > 1]) # Considering the genomovars with more than one genome 80% have only one ST
+
+```
+
+```{r}
+ANI_clustering_Lp_ST %>% ungroup() %>% 
+  select(legio_id, strain_cluster, ST) %>% 
+  dplyr::rename(Ref_legio_id = legio_id, Ref_strain_cluster = strain_cluster, Ref_ST = ST)
+ANI_mashCluster_42_info <- ANI_mashCluster_42 %>% 
+  left_join(ANI_clustering_Lp_ST %>% ungroup() %>% 
+            select(legio_id, strain_cluster, ST) %>% 
+            dplyr::rename(Ref_legio_id = legio_id, Ref_strain_cluster = strain_cluster, Ref_ST = ST)) %>% 
+  left_join(ANI_clustering_Lp_ST %>% ungroup() %>% 
+            select(legio_id, strain_cluster, ST) %>% 
+            dplyr::rename(Query_legio_id = legio_id, Query_strain_cluster = strain_cluster, Query_ST = ST))  
+ANI_mashCluster_42_info <- ANI_mashCluster_42_info %>% filter(!(is.na(Ref_ST) | is.na(Query_ST)))
+```
+
+```{r}
+ANI_mashCluster_42_info_summ <- ANI_mashCluster_42_info %>% 
+  group_by(Ref_ST, Query_ST) %>% 
+  summarise(ANI_min = min(ANI),
+            ANI_mean = mean(ANI),
+            ANI_median = median(ANI),
+            ANI_max = max(ANI),
+            n_comparisons = n())
+
+
+ANI_mashCluster_42_info %>% 
+  group_by(Ref_ST == Query_ST) %>% 
+  summarise(ANI_min = min(ANI),
+            ANI_mean = mean(ANI),
+            ANI_median = median(ANI),
+            ANI_max = max(ANI),
+            Align_fraction_ref_min = min(Align_fraction_ref),
+            Align_fraction_ref_mean = mean(Align_fraction_ref),
+            Align_fraction_ref_median = median(Align_fraction_ref),
+            Align_fraction_ref_max = max(Align_fraction_ref),
+            n_comparisons = n(),)
+
+ANI_mashCluster_42_info %>% 
+  ggplot(aes(ANI, fill = Ref_ST == Query_ST)) +
+  #geom_density(alpha = 0.5, adjust = 2) +
+  geom_histogram(aes(y=..density..), position = position_dodge()) +
+  scale_x_continuous(breaks = c(96, 98, 99.5, 100)) +
+  geom_vline(xintercept = 99.5, linetype = 2) +
+  labs(x = "ANI [-]", y = "Probability density [-]", fill = "Shared ST") +
+  scale_fill_met_d("OKeeffe1")
+#ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/Lpneumophila_ANI_ST_hist.pdf", dpi = 600, width = 10, height = 7)
+
+```
+
+```{r}
+similarANI_differentST <- ANI_mashCluster_42_info_summ %>% 
+  filter(Ref_ST != Query_ST) %>% 
+  filter(ANI_mean > 99.5)
+
+ANI_mashCluster_42_info_99.5ANI <- ANI_mashCluster_42_info %>%
+  filter(ANI > 99.5 & Ref_ST != Query_ST) %>% 
+  mutate(same_ST = Ref_ST == Query_ST,
+         same_genomovar = Ref_strain_cluster == Query_strain_cluster)
+  
+```
+

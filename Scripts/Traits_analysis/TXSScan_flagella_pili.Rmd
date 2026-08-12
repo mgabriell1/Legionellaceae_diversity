@@ -1,0 +1,105 @@
+---
+title: "TXSScan results analysis focusing on flagella and pili"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r message=FALSE}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv")) 
+
+txsscan_files <- list.files(paste0(data_dir, "/TXSScan_results/Summary_output"), full.names = TRUE)
+
+txsscan_results <- read_tsv(txsscan_files[1], skip = 3, id = "filename")
+for (i in 2:length(txsscan_files)){
+  txsscan_results_tmp <- read_tsv(txsscan_files[i], skip = 3, id = "filename")
+  txsscan_results <- bind_rows(txsscan_results, txsscan_results_tmp)
+}
+colnames(txsscan_results) <- paste0("TXSScan_",gsub("TXSScan-1.1.0/bacteria/diderm/","",colnames(txsscan_results)))
+txsscan_results <- txsscan_results %>% mutate(legio_id = word(word(TXSScan_filename, 11, sep = fixed("/")), 1, sep = "_")) %>% select(-TXSScan_filename, -TXSScan_replicon)
+```
+
+```{r}
+LegioInfo_txss <- LegioInfo %>% left_join(txsscan_results)
+
+LegioInfo_txss_summary <- LegioInfo_txss %>% pivot_longer(starts_with("TXSScan_")) %>% 
+  mutate(presence = as.numeric(value > 0)) %>% 
+  group_by(genus_cluster, name) %>% 
+  summarise(n_genomes = n(), presences = sum(presence), percentage_presence = presences/n_genomes)
+
+LegioInfo_txss_summary %>% 
+  ggplot(aes(genus_cluster, name, fill = percentage_presence)) +
+  geom_tile()
+
+```
+
+```{r}
+LegioInfo_txss_summary %>% 
+  group_by(name) %>% filter(sum(presences) > 0) %>% # Remove TXSS without any presences
+  filter(str_detect(name, "Flag|T4a")) %>% 
+  ggplot() +
+  geom_col(aes(genus_cluster, n_genomes, fill = "n genomes")) +
+  geom_col(aes(genus_cluster, presences, fill = "present")) +
+  facet_wrap(~name)
+
+# To check if the presence of non-flagellated genomes in genus cluster 1 is linked to AAI threshold used -> no
+LegioInfo_txss %>% pivot_longer(starts_with("TXSScan_")) %>% 
+  mutate(presence = as.numeric(value > 0)) %>% filter(str_detect(name, "Flag")) %>% 
+  filter(genus_cluster == 1) %>% 
+  group_by(genus_cluster_literature) %>% 
+  summarise(n_genomes = n(), presences = sum(presence), percentage_presence = presences/n_genomes) %>% 
+  ggplot() +
+  geom_col(aes(genus_cluster_literature, n_genomes, fill = "n genomes")) +
+  geom_col(aes(genus_cluster_literature, presences, fill = "present"))
+
+```
+```{r}
+
+LegioInfo_txss_pil <- LegioInfo_txss %>% 
+  #filter(genus_cluster_bestConcordance %in% c(6,13)) %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster, genus_cluster) %>% 
+  summarise(n_genomes = n(),
+            presences_Pili = sum(TXSScan_T4aP > 0))
+LegioInfo_txss_pil %>% group_by(genus_cluster) %>% 
+  summarise(species_positives_perc = sum(presences_Pili > 0)/n()) %>% filter(species_positives_perc > 0) %>% nrow() 
+# pili detected in genomes from 16 genera
+
+
+
+```
+```{r}
+
+LegioInfo_txss_flag <- LegioInfo_txss %>% 
+  #filter(genus_cluster_bestConcordance %in% c(6,13)) %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster, genus_cluster_bestConcordance, gtdbtk.classification) %>% 
+  summarise(n_genomes = n(),
+            presences_Flag = sum(TXSScan_Flagellum > 0))
+LegioInfo_txss_flag %>% group_by(genus_cluster_bestConcordance) %>% 
+  summarise(species_positives_perc = sum(presences_Flag > 0)/n()) %>% filter(species_positives_perc > 0) %>% nrow() 
+# pili detected in genomes from 10 genera
+
+
+
+```
+
+```{r}
+Flagellum_pili <- LegioInfo_txss %>% select(legio_id, genus_cluster_bestConcordance, TXSScan_Flagellum, TXSScan_T4aP) %>% mutate(flag = TXSScan_Flagellum > 0, pil = TXSScan_T4aP > 0)
+
+survival::clogit(flag ~ pil, data = Flagellum_pili)
+Flagellum_pili %>% group_by(pil, flag) %>% summarise(n = n())
+# Pili and flagella tend to co-occur
+
+Flagellum_pili %>% group_by(genus_cluster_bestConcordance) %>% 
+  summarise(pili = paste0(unique(pil), collapse = ","),
+            flag = paste0(unique(flag), collapse = ","))
+
+LegioInfo_txss %>% select(legio_id, genus_cluster_bestConcordance, TXSScan_Flagellum, TXSScan_T4aP) %>% 
+  write_tsv(paste0(data_dir, "/TXSScan_results/LegioInfo_red_Flagella_Pili.tsv"))
+```

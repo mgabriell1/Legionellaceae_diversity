@@ -1,0 +1,279 @@
+---
+title: "AAI vs popc"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(ape)
+theme_set(theme_classic(base_size = 16))
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+
+aai_files_list <- list.files(paste0(data_dir,"legionome_ANI_AAI/AAI"), pattern = "txt", full.names = TRUE)
+aai <- read_tsv(aai_files_list, id = "filename")
+pocp <- read_csv(paste0(data_dir,"legionome_ANI_AAI/pocp_Legionome.csv"), col_names = FALSE) %>% dplyr::rename(comparison = X1, pocp = X2)
+
+tree <- read.tree(paste0(data_dir, "phylogeneticTrees/SUPERMATRIX.partitions.new.nex.treefile"))
+```
+
+```{r}
+pocp <- pocp %>% mutate(comparison = gsub(".txt","", comparison),
+                        query = word(comparison, 1, sep = "-vs-"),
+                        target = word(comparison, 2, sep = "-vs-"))
+
+aai <- aai %>% mutate(target = gsub(".faa","", target),
+                      query = gsub(".faa","", query))
+
+aai_pocp <- aai %>% inner_join(pocp) %>% 
+  mutate(AAI_estimate = as.numeric(gsub(">|%","",AAI_estimate)))
+```
+
+```{r}
+aai_pocp %>% 
+  ggplot(aes(AAI_estimate, pocp)) +
+  geom_point()
+
+```
+
+```{r}
+
+aai_pocp_info <- aai_pocp %>% 
+  mutate(query = word(query, 1, sep = "_"),
+         target = word(target, 1, sep = "_"),) %>% 
+  left_join(metadata %>% mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+              select(legio_id, species_cluster, genus_cluster, genus_cluster_v1, 
+                                genus_cluster_literature, gtdb_genus) %>% 
+              dplyr::rename(query = legio_id, species_cluster_query = species_cluster, genus_query = genus_cluster, 
+                     genus_lit_query = genus_cluster_literature, 
+                     genus_v1_query = genus_cluster_v1, gtdb_genus_query =  gtdb_genus)) %>% 
+  left_join(metadata %>% mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+              select(legio_id, species_cluster, genus_cluster, genus_cluster_v1, 
+                                genus_cluster_literature, gtdb_genus) %>% 
+              dplyr::rename(target = legio_id, species_cluster_target = species_cluster, genus_target = genus_cluster, 
+                     genus_lit_target = genus_cluster_literature,
+                     genus_v1_target = genus_cluster_v1, gtdb_genus_target =  gtdb_genus))
+
+tree_dist <- cophenetic.phylo(tree) %>% as.data.frame() %>% rownames_to_column("query") %>% as_tibble() %>% 
+  pivot_longer(-query, names_to = "target", values_to = "phylo_dist")  %>% 
+  mutate(query = word(query, 1, sep = "_"),
+         target = word(target, 1, sep = "_"))
+```
+
+```{r}
+aai_pocp_info_phylo <- aai_pocp_info %>% left_join(tree_dist)
+
+aai_pocp_info_phylo %>% ggplot(aes(pocp, phylo_dist)) + geom_point()
+
+```
+
+```{r}
+
+# AAI literature boundaries
+aai_pocp_info_litBoundaries <- aai_pocp_info %>% 
+  mutate(same_genus_v1 = genus_v1_query == genus_v1_target)
+
+aai_pocp_info_litBoundaries %>% 
+  pivot_longer(c(AAI_estimate, pocp)) %>% 
+  ggplot(aes(value, fill = same_genus_v1)) +
+  geom_histogram(position = "identity", alpha = 0.5) +
+  facet_wrap(~name)
+
+# V1 AAI boundaries
+aai_pocp_info_firstVersionBoundaries <- aai_pocp_info %>% 
+  mutate(same_genus_lit = genus_lit_query == genus_lit_target)
+
+aai_pocp_info_firstVersionBoundaries %>% 
+  pivot_longer(c(AAI_estimate, pocp)) %>% 
+  ggplot(aes(value, fill = same_genus_lit)) +
+  geom_histogram(position = "identity", alpha = 0.5) +
+  facet_wrap(~name)
+
+
+# GTDB geners
+aai_pocp_info_gtdb <- aai_pocp_info %>% 
+  mutate(same_genus_gtdb = gtdb_genus_query == gtdb_genus_target)
+
+aai_pocp_info_gtdb %>% 
+  pivot_longer(c(AAI_estimate, pocp)) %>% 
+  ggplot(aes(value, fill = same_genus_gtdb)) +
+  geom_histogram(position = "identity", alpha = 0.5) +
+  facet_wrap(~name)
+
+# Genus clusters V2
+aai_pocp_info_gtdb <- aai_pocp_info %>% 
+  mutate(same_genus = genus_query == genus_target)
+
+aai_pocp_info_gtdb %>% 
+  dplyr::rename(AAI = AAI_estimate, POCP = pocp) %>% 
+  pivot_longer(c(AAI, POCP)) %>% 
+  ggplot(aes(value, fill = same_genus)) +
+  geom_histogram(aes(y=..density..), position = "identity", alpha = 0.5) +
+  facet_wrap(~name) +
+  labs(y = "Density [-]", x = "Value [%]", fill = "Same genus cluster")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/POCP_AAI_genusDefinition.pdf", dpi = 600)
+```
+
+```{r}
+
+# Lit AAI genus boundaries
+aai_pocp_info %>% 
+  filter(genus_lit_query == genus_lit_target) %>% 
+  group_by(genus_lit_query) %>% 
+  summarise(pocp_min = min(pocp),
+            pocp_mean = mean(pocp),
+            pocp_median = median(pocp),
+            pocp_max = max(pocp))
+
+aai_pocp_info %>% 
+  filter(genus_lit_query == genus_lit_target) %>% 
+  group_by(genus_lit_query) %>% 
+  summarise(AAI_min = min(AAI_estimate),
+            AAI_mean = mean(AAI_estimate),
+            AAI_median = median(AAI_estimate),
+            AAI_max = max(AAI_estimate))
+
+```
+
+```{r}
+
+# Genus V1 coundaries
+aai_pocp_info %>% 
+  filter(genus_v1_query == genus_v1_target) %>% 
+  group_by(genus_v1_target) %>% 
+  summarise(pocp_min = min(pocp),
+            pocp_mean = mean(pocp),
+            pocp_median = median(pocp),
+            pocp_max = max(pocp))
+  
+aai_pocp_info %>% 
+  filter(genus_v1_query == genus_v1_target) %>% 
+  group_by(genus_v1_target) %>% 
+  summarise(AAI_min = min(AAI_estimate),
+            AAI_mean = mean(AAI_estimate),
+            AAI_median = median(AAI_estimate),
+            AAI_max = max(AAI_estimate))
+```
+```{r}
+
+# Genus gtdb boundaries
+aai_pocp_info %>% 
+  filter(gtdb_genus_query == gtdb_genus_target) %>% 
+  group_by(gtdb_genus_query) %>% 
+  summarise(pocp_min = min(pocp),
+            pocp_mean = mean(pocp),
+            pocp_median = median(pocp),
+            pocp_max = max(pocp))
+
+aai_pocp_info %>% 
+  filter(gtdb_genus_query == gtdb_genus_target) %>% 
+  group_by(gtdb_genus_query) %>% 
+  summarise(AAI_min = min(AAI_estimate),
+            AAI_mean = mean(AAI_estimate),
+            AAI_median = median(AAI_estimate),
+            AAI_max = max(AAI_estimate))
+```
+
+
+```{r}
+
+# Genus boundaries V2
+aai_pocp_info %>% 
+  filter(genus_query == genus_target) %>% 
+  group_by(genus_query) %>% 
+  summarise(pocp_min = min(pocp),
+            #pocp_5perc = quantile(pocp, 0.05),
+            pocp_mean = mean(pocp),
+            pocp_median = median(pocp),
+            pocp_max = max(pocp))
+
+aai_pocp_info %>% 
+  filter(genus_query == genus_target) %>% 
+  group_by(genus_query) %>% 
+  summarise(AAI_min = min(AAI_estimate),
+            #AAI_5perc = quantile(AAI_estimate, 0.05),
+            AAI_mean = mean(AAI_estimate),
+            AAI_median = median(AAI_estimate),
+            AAI_max = max(AAI_estimate))
+  
+```
+
+
+
+```{r}
+
+aai_pocp_info_genus6 <- aai_pocp_info %>% 
+  filter((gtdb_genus_query %in% c("g__Tatlockia","g__Legionella_C")) & (gtdb_genus_target %in% c("g__Tatlockia","g__Legionella_C"))) %>% 
+  mutate(sameGenus = gtdb_genus_query == gtdb_genus_target) %>% 
+  group_by(species_cluster_query, species_cluster_target) %>% sample_n(size = 1)
+  
+aai_pocp_info_genus6 %>% 
+  pivot_longer(c(AAI_estimate, pocp)) %>% 
+  ggplot(aes(value, fill = sameGenus)) +
+  geom_histogram(position = "identity", alpha = 0.5) +
+  facet_wrap(~name)
+
+aai_pocp_info_genus6 %>% ungroup() %>% 
+  rstatix::wilcox_test(pocp ~ sameGenus)
+
+aai_pocp_info_genus6 %>% ungroup() %>% 
+  rstatix::wilcox_test(AAI_estimate ~ sameGenus)
+
+aai_pocp_info_genus6 %>%
+  filter(pocp < 50) %>% 
+  group_by(sameGenus) %>% 
+  summarise(n = n())
+# 75% of pocp below 50% are among the two gtdb genera, but those count for only 4% of total pocp comparisons <- to merge in a single genus
+
+
+aai_pocp_info_genus6_phylo <- aai_pocp_info_genus6 %>% 
+  left_join(tree_dist)
+
+aai_pocp_info_genus6_phylo %>% 
+  ggplot(aes(pocp, phylo_dist, col = sameGenus)) +
+  geom_point() +
+  #geom_hline(yintercept = 0.3) +
+  geom_vline(xintercept = 50, col = "grey", linetype = 2) +
+  labs(x = "POCP [%]", y = "Cophenetic distance [-]", col = "Same genus cluster")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/POCP_phyloDist_Genus6.pdf", dpi = 600)
+
+aai_pocp_info_genus6_phylo %>% filter(phylo_dist > 0.3) %>% 
+  ungroup() %>% 
+  rstatix::wilcox_test(pocp ~ sameGenus)
+# Compared to GTDB classification only highly related taxa have higher pocp, otherwise 
+```
+```{r}
+
+clades_GM <- read_csv("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/Clades_GomezValero_PNAS.csv")
+
+aai_pocp_info_sciName <- aai_pocp_info %>% 
+  left_join(metadata %>% select(legio_id, scientific_name.ncbi) %>% rename(query = legio_id, species_query = scientific_name.ncbi)) %>% 
+  left_join(metadata %>% select(legio_id, scientific_name.ncbi) %>% rename(target = legio_id, species_target = scientific_name.ncbi)) %>% 
+  mutate(species_query = gsub("Legionella","L.", species_query),
+         species_target = gsub("Legionella","L.", species_target))
+
+
+aai_pocp_info_sciName_clades <- aai_pocp_info_sciName %>% 
+  left_join(clades_GM %>% rename(species_query = Species, Clade_GomezValero_query = Clades_GomezValero)) %>% 
+  left_join(clades_GM %>% rename(species_target = Species, Clade_GomezValero_target = Clades_GomezValero))
+
+aai_pocp_info_sciName_clades %>% 
+  filter((Clade_GomezValero_query %in% c("C4","C5")) & (Clade_GomezValero_target %in% c("C4","C5"))) %>% 
+  mutate(pocp_more50 = pocp >= 50) %>% 
+  group_by(pocp_more50) %>% 
+  summarise(n = n())
+
+aai_pocp_info_sciName_clades %>% 
+  filter((Clade_GomezValero_query %in% c("C2","C3")) & (Clade_GomezValero_target %in% c("C2","C3"))) %>% 
+  mutate(pocp_more50 = pocp >= 50) %>% 
+  group_by(pocp_more50) %>% 
+  summarise(n = n())
+
+
+```

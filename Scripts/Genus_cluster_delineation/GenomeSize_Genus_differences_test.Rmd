@@ -1,0 +1,85 @@
+---
+title: "Genome size vs isolation & genus"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, checkm2.Genome_Size, species_info, isolated, genus_cluster, genus_cluster_literature)
+
+
+```
+
+```{r}
+metadata_red <- metadata_red %>% mutate(estimated.Genome_Size = checkm2.Genome_Size/checkm2.Completeness*100)
+
+metadata_red %>% group_by(species_cluster) %>% mutate(diff_isol = length(unique(isolated)) > 1) %>% filter(diff_isol)
+# No species with both isolated and non-isolated representative genomovars
+
+metadata_red %>% 
+  ggplot(aes(as.factor(genus_cluster), estimated.Genome_Size/10^6, fill = isolated)) +
+  geom_boxplot() 
+
+metadata_red %>% 
+  group_by(genus_cluster) %>% 
+  mutate(estimated.Genome_Size = estimated.Genome_Size/10^6,
+         diff_isol = length(unique(isolated)) > 1) %>% 
+  filter(diff_isol) %>% 
+  rstatix::t_test(estimated.Genome_Size ~ isolated, detailed = TRUE)
+```
+
+```{r}
+
+gSize_mod <- lm(estimated.Genome_Size ~ as.factor(genus_cluster) + isolated, data = metadata_red)
+summary(gSize_mod)
+
+summary(aov(gSize_mod))
+```
+
+```{r}
+anova_isolates <- with(metadata_red %>% filter(isolated), aov(estimated.Genome_Size ~ as.factor(genus_cluster)))
+summary(anova_isolates)
+
+TukeyHSD(anova_isolates)
+
+
+```
+
+
+```{r}
+anova_genome_size_pvals <- c()
+metadata_red_tmp_tot <- tibble()
+anova_posthoc_res_tot <- tibble()
+for (i in 1:1000){
+  metadata_red_tmp <- metadata_red %>% 
+  mutate(mags_missing_bp_rand = runif(nrow(metadata_red), 0.22*10^6, 1.11*10^6),
+         corrected.Genome_Size = ifelse(isolated, estimated.Genome_Size, estimated.Genome_Size+mags_missing_bp_rand)) 
+  anova_tmp <- aov(metadata_red_tmp$corrected.Genome_Size ~ as.factor(metadata_red_tmp$genus_cluster))
+  pval_tmp <- summary(anova_tmp)[[1]][["Pr(>F)"]][1]
+  anova_posthoc_res_tot <- anova_posthoc_res_tot %>% 
+    bind_rows(as.data.frame(TukeyHSD(anova_tmp)$`as.factor(metadata_red_tmp$genus_cluster)`) %>%
+    tibble::rownames_to_column(var = "Row") %>% as_tibble())
+  anova_genome_size_pvals <- c(anova_genome_size_pvals, pval_tmp)
+  metadata_red_tmp_tot <- metadata_red_tmp_tot %>% bind_rows(metadata_red_tmp)
+}
+sum(anova_genome_size_pvals > 0.05)
+# In no cases even when accounting for missed completeness the genome size is constant across genera
+max(anova_genome_size_pvals) # all anova pvals < 0.001
+
+posthoc_differences <-  anova_posthoc_res_tot %>% group_by(Row) %>% summarise(p_diff = sum(`p adj` < 0.05)/n())
+
+metadata_red_tmp_tot %>% select(-mags_missing_bp_rand)%>% distinct() %>% 
+  ggplot(aes(as.factor(genus_cluster), corrected.Genome_Size/10^6, fill = any(isolated))) + 
+  geom_boxplot(outlier.size = 0.1, position = position_dodge(preserve = "single"), fill = "lightgrey") +
+  labs(y = "Corrected genome size [Mb]", x = "Genus", fill = "Isolated genome")
+#ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/Corrected_GenomeSize_comparison.pdf", dpi = 600)
+```

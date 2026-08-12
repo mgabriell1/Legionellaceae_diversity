@@ -1,0 +1,74 @@
+---
+title: "TSS vs plasmids"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(rBLAST)
+library(Biostrings)
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, strain_cluster, tax_short, gtdbtk.classification, species_info, isolated, genus_cluster)
+
+plasmids_files <- list.files(paste0(data_dir,"/platon_results"), pattern= "tsv", full.names = TRUE) # Genomes without plasmids have no file
+plasmids <- read_tsv(plasmids_files, id = "filename")
+plasmids <- plasmids %>% mutate(legio_id = word(gsub(paste0(data_dir,"/platon_results/"), "", filename), 1, sep = "_"))
+
+prot_files <- list.files(paste0(data_dir, "/proteinFolder_legionome/gff3_files"), full.names = TRUE)
+prots_locs <- read_tsv(prot_files, id = "filename", comment = "#", col_names = FALSE)
+prots_locs <- prots_locs %>% mutate(legio_id = word(gsub(paste0(data_dir,"/proteinFolder_legionome/gff3_files/"), "", filename), 1, sep = "_"))
+prots_locs <- prots_locs %>% filter(!is.na(X9))
+prots_locs <- prots_locs %>% mutate(hit_id = gsub("ID=", "", word(X9, 1, sep = ";")))
+                                      
+TXSScan_files <- list.files(paste0(data_dir, "/TXSSCAN_results/Best_solution"), full.names = TRUE)
+TXSScan_res <- read_tsv(TXSScan_files, id = "filename", comment = "#")
+
+CONJscan_files <- list.files(paste0(data_dir, "/CONJscan_results/Best_solution"), full.names = TRUE)
+CONJscan_res <- read_tsv(CONJscan_files[(file.info(CONJscan_files)$size - 417) > 0], id = "filename", comment = "#") # to remove files with just header (which is 417 bytes big)
+```
+
+```{r}
+
+TXSScan_res <- TXSScan_res %>% left_join(prots_locs, by = "hit_id") 
+TXSScan_res <- TXSScan_res %>% 
+  left_join(plasmids, by = c("legio_id", "X1" = "ID"))
+
+TXSScan_res_plasmid_summary <- TXSScan_res %>% 
+  group_by(legio_id, model_fqn, sys_id) %>% 
+  summarise(n_prots = n(), prots_on_plasmid = sum(!is.na(Circular)), perc_on_plasmid = prots_on_plasmid/n_prots)
+
+#
+CONJscan_res <- CONJscan_res %>% left_join(prots_locs, by = "hit_id") 
+CONJscan_res <- CONJscan_res %>% 
+  left_join(plasmids, by = c("legio_id", "X1" = "ID"))
+
+CONJscan_res_plasmid_summary <- CONJscan_res %>% 
+  group_by(legio_id, model_fqn, sys_id) %>% 
+  summarise(n_prots = n(), prots_on_plasmid = sum(!is.na(Circular)), perc_on_plasmid = prots_on_plasmid/n_prots)
+
+```
+
+```{r}
+TXSScan_res_plasmid_summary_type <- TXSScan_res_plasmid_summary %>% 
+  group_by(model_fqn) %>% 
+  summarise(total_number = n(),
+            plasmid_associated = sum(perc_on_plasmid > 0.95),
+            perc_plasmid_associated = plasmid_associated/total_number)
+
+CONJscan_res_plasmid_summary_type <- CONJscan_res_plasmid_summary %>% 
+  group_by(model_fqn) %>% 
+  summarise(total_number = n(),
+            plasmid_associated = sum(perc_on_plasmid > 0.75),
+            perc_plasmid_associated = plasmid_associated/total_number)
+
+write_tsv(CONJscan_res_plasmid_summary_type, paste0(data_dir, "/CONJscan_results/CONJscan_plasmid.tsv"))
+```

@@ -1,0 +1,365 @@
+---
+title: "DBCAN results"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ape)
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, strain_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster, genus_cluster_literature)
+
+cazy_files <- list.files(paste0(data_dir,"/dbcan_results"), pattern= "txt", full.names = TRUE)
+cazy_tot <- read_tsv(cazy_files, id = "filename")
+cazy_tot <- cazy_tot %>% mutate(legio_id = gsub(paste0(data_dir,"/dbcan_results/"), "", filename),
+                                legio_id = gsub("_overview.txt", "", legio_id))
+
+dbcansub_files <- list.files(paste0(data_dir,"/dbcan_results"), pattern= "out", full.names = TRUE)
+dbcansub_tot <- read_tsv(dbcansub_files, id = "filename")
+dbcansub_tot <- dbcansub_tot %>% mutate(legio_id = gsub(paste0(data_dir,"/dbcan_results/"), "", filename),
+                                        legio_id = gsub("_dbsub.out", "", legio_id))
+
+signalp_files <- list.files(paste0(data_dir, "/signalp6_results"), full.names = TRUE)
+signalp_results <- read_tsv(signalp_files, skip = 1, id = "filename")
+
+tree <- read.tree(paste0(data_dir,"/phylogeneticTrees/msa_softcore_protein_withOutgroup_Concatenator/iTOL_figure/Legionome_metadata_tree_rooted.treefile"))
+
+
+```
+
+```{r}
+signalp_results <- signalp_results %>% 
+  mutate(legioid = word(word(filename, 10, sep = "/"), 1, sep = "_"),
+         `Gene ID` = word(`# ID`, 1),
+         signal_pep = ifelse(Prediction == "OTHER", FALSE, TRUE))
+cazy_tot <- cazy_tot %>% filter(`#ofTools` > 1) %>% # As specified in website
+  left_join(signalp_results %>% select(`Gene ID`, signal_pep))
+
+cazy_tot_info_pep <- cazy_tot %>% group_by(legio_id, signal_pep) %>% summarise(n_cazymes = n()) %>% left_join(metadata_red)
+cazy_tot_info_pep %>% ggplot(aes(as.factor(genus_cluster), n_cazymes, fill = signal_pep)) +
+  geom_boxplot()
+cazy_tot_info_pep %>% pivot_wider(names_from = signal_pep, names_prefix = "signalp_", values_from = n_cazymes) %>% 
+  mutate(extracellulr_to_not = signalp_TRUE/signalp_FALSE) %>% 
+  summary()
+# on average there are almost double intracellular cazymes then extracellular (extr/intr = 0.53)
+
+cazy_tot_info <- cazy_tot %>% group_by(legio_id) %>% summarise(n_cazymes = n()) %>% left_join(metadata_red)
+cazy_tot_info %>% ggplot(aes(checkm2.Completeness, n_cazymes, col = isolated)) +
+  geom_point() + facet_wrap(~isolated)
+cazy_tot_info %>% ggplot(aes(n_cazymes, fill = isolated)) + geom_density()
+t.test(n_cazymes ~ isolated, data = cazy_tot_info)
+# Less cazymes in non-isolated genomes (p.val < 0.001) but this conflates differences possibly caused by different genera and bioinformatics.
+# Let's compare isolated vs non-isolated within the same genus
+
+
+cazy_tot_info_iso_vsnoniso <- cazy_tot_info %>% 
+  group_by(genus_cluster) %>% 
+  mutate(temp = paste0(unique(isolated), collapse = ",")) %>% 
+  filter(str_detect(temp, ",")) 
+cazy_tot_info_iso_vsnoniso %>% 
+  ggplot(aes(isolated, n_cazymes)) +
+  geom_boxplot() +
+  facet_wrap(~genus_cluster)
+
+cazy_tot_info_iso_vsnoniso %>% group_by(genus_cluster) %>% 
+  rstatix::t_test(n_cazymes ~ isolated)
+# Still lower number of cazymes within the same genus, even though there are differences across genera
+cazy_tot_info %>% filter(isolated) %>% 
+  rstatix::anova_test(n_cazymes ~ genus_cluster)
+
+
+cazy_tot_info %>% 
+  ggplot(aes(as.factor(genus_cluster), n_cazymes, fill = isolated)) +
+  geom_boxplot() 
+# number of cazymes varies across genera
+
+cazy_tot_info_signalp <- cazy_tot %>% group_by(legio_id, signal_pep) %>% summarise(n_cazymes = n()) %>% left_join(metadata_red)
+cazy_tot_info_signalp %>% 
+  ggplot(aes(as.factor(genus_cluster), n_cazymes, fill = isolated)) +
+  geom_boxplot() +
+  facet_wrap(~signal_pep)
+
+cazy_tot_info_signalp %>% filter(isolated) %>% 
+  group_by(signal_pep) %>% 
+  rstatix::tukey_hsd(n_cazymes ~ as.factor(genus_cluster))
+
+cazy_tot_info_signalp %>% filter(isolated) %>%
+  mutate(type = ifelse(signal_pep, "Secreted", "Intracellular")) %>% 
+  ggplot(aes(as.factor(genus_cluster), n_cazymes, fill = type)) +
+  geom_boxplot(outlier.size = 0.1) +
+  facet_wrap(~type)
+
+
+```
+
+```{r}
+cazy_tot_classes <- cazy_tot %>% mutate(cazy_hmmer = word(word(HMMER, 1, sep = stringr::fixed("(")), 1, sep = "_"),
+                    cazy_sub = word(word(dbCAN_sub, 1, sep = "_"), 1, sep = stringr::fixed("+")),
+                    cazy_diamond = word(DIAMOND, 1, sep = stringr::fixed("+"))) %>% 
+  pivot_longer(c(cazy_hmmer, cazy_sub, cazy_diamond)) %>% 
+  group_by(legio_id, `Gene ID`, value, signal_pep) %>% 
+  mutate(n = n()) %>% 
+  group_by(legio_id, `Gene ID`) %>% 
+  filter(n == max(n)) %>% 
+  sample_n(1) %>%  # to get only one class per entry taken as the one most voted from dbCAN methods
+  dplyr::rename(cazy_class = value)
+
+cazy_tot_classes_summary <- cazy_tot_classes %>% left_join(metadata_red) %>% 
+  group_by(legio_id, genus_cluster, signal_pep, isolated) %>% 
+  summarise(n_cazy_classes = length(unique(cazy_class))) 
+cazy_tot_info_signalp <- cazy_tot_info_signalp %>% left_join(cazy_tot_classes_summary)
+
+
+write_tsv(cazy_tot_info_signalp, paste0(data_dir,"/dbcan_results/LegioInfo_DBCAN.tsv"))
+
+
+```
+
+
+
+```{r}
+# Beta diversity rarefying the number of CAZYmes to a common value
+cazy_tot_classes_mat_rarefTot <- cazy_tot_classes %>% 
+  filter(!signal_pep) %>% 
+  group_by(legio_id) %>% 
+  mutate(n_cazymes_genome = n()) %>% 
+  filter(n_cazymes_genome >= 26) %>% # 21 is the first quartile of cazymes found in a genome
+  sample_n(26) %>% 
+  group_by(legio_id, cazy_class) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = cazy_class, values_from = n)
+cazy_tot_classes_mat_rarefTot[is.na(cazy_tot_classes_mat_rarefTot)] <- 0
+
+row_names_rarefTot <- cazy_tot_classes_mat_rarefTot$legio_id
+cazy_tot_classes_mat_rarefTot <- as.data.frame(cazy_tot_classes_mat_rarefTot %>% ungroup()%>% select(-legio_id))
+rownames(cazy_tot_classes_mat_rarefTot) <- row_names_rarefTot
+cazy_relNumber_dist_rarefTot <- vegan::vegdist(cazy_tot_classes_mat_rarefTot)
+              
+mds_rarefTot <- vegan::metaMDS(cazy_tot_classes_mat_rarefTot, trymax = 100, k = 3)        
+
+mds_rarefTot_tbl <- as_tibble(mds_rarefTot$points) %>% mutate(legio_id = rownames(mds_rarefTot$points)) %>% left_join(metadata_red)
+# ggplot(mds_rarefTot_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+#   theme_void() +
+#   axes_3D() + 
+#   stat_3D()
+
+vegan::anosim(cazy_relNumber_dist_rarefTot, mds_rarefTot_tbl %>% pull(genus_cluster))
+# weak significant differences for species info, while no for genus_cluster and isolated (see here though: https://github.com/vegandevs/vegan/discussions/586)
+vegan::adonis2(cazy_relNumber_dist_rarefTot ~ as.factor(genus_cluster)*isolated, data = mds_rarefTot_tbl)
+# signicant terms for both genus_cluster and isolated, while interaction not
+```
+```{r}
+# Beta diversity rarefying the number of signalp CAZYmes to a common value
+cazy_tot_classes_mat_signalp_rarefTot <- cazy_tot_classes %>% 
+  filter(signal_pep) %>% 
+  group_by(legio_id) %>% 
+  mutate(n_cazymes_genome = n()) 
+cazy_tot_classes_mat_signalp_rarefTot %>% pull(n_cazymes_genome) %>% quantile(0.25)
+
+cazy_tot_classes_mat_signalp_rarefTot <- cazy_tot_classes_mat_signalp_rarefTot%>% 
+  filter(n_cazymes_genome >= 17) %>% # 17 is the first quartile of cazymes found in a genome
+  sample_n(17) %>% 
+  group_by(legio_id, cazy_class) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = cazy_class, values_from = n)
+cazy_tot_classes_mat_signalp_rarefTot[is.na(cazy_tot_classes_mat_signalp_rarefTot)] <- 0
+
+row_names_rarefTot <- cazy_tot_classes_mat_signalp_rarefTot$legio_id
+cazy_tot_classes_mat_signalp_rarefTot <- as.data.frame(cazy_tot_classes_mat_signalp_rarefTot %>% ungroup()%>% select(-legio_id))
+rownames(cazy_tot_classes_mat_signalp_rarefTot) <- row_names_rarefTot
+cazy_relNumber_dist_signalp_rarefTot <- vegan::vegdist(cazy_tot_classes_mat_signalp_rarefTot)
+              
+mds_signalp_rarefTot <- vegan::metaMDS(cazy_tot_classes_mat_signalp_rarefTot, trymax = 100, k = 3)        
+
+mds_signalp_rarefTot_tbl <- as_tibble(mds_signalp_rarefTot$points) %>% mutate(legio_id = rownames(mds_signalp_rarefTot$points)) %>% left_join(metadata_red)
+# ggplot(mds_rarefTot_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+#   theme_void() +
+#   axes_3D() + 
+#   stat_3D()
+
+vegan::anosim(cazy_relNumber_dist_signalp_rarefTot, mds_signalp_rarefTot_tbl %>% pull(genus_cluster))
+# weak significant differences for species info, while no for genus_cluster and isolated (see here though: https://github.com/vegandevs/vegan/discussions/586)
+vegan::adonis2(cazy_relNumber_dist_signalp_rarefTot ~ isolated + as.factor(genus_cluster), data = mds_signalp_rarefTot_tbl)
+# signicant terms for both genus_cluster and isolated, while interaction not
+```
+```{r}
+# Beta diversity rarefying the number of not signalp CAZYmes to a common value
+cazy_tot_classes_mat_notSignalp_rarefTot <- cazy_tot_classes %>% 
+  filter(!signal_pep) %>% 
+  group_by(legio_id) %>% 
+  mutate(n_cazymes_genome = n()) 
+cazy_tot_classes_mat_notSignalp_rarefTot %>% pull(n_cazymes_genome) %>% quantile(0.25)
+
+cazy_tot_classes_mat_notSignalp_rarefTot<- cazy_tot_classes_mat_notSignalp_rarefTot %>% 
+  filter(n_cazymes_genome >= 28) %>% # 11 is the first quartile of cazymes found in a genome
+  sample_n(28) %>% 
+  group_by(legio_id, cazy_class) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = cazy_class, values_from = n)
+cazy_tot_classes_mat_notSignalp_rarefTot[is.na(cazy_tot_classes_mat_notSignalp_rarefTot)] <- 0
+
+row_names_rarefTot <- cazy_tot_classes_mat_notSignalp_rarefTot$legio_id
+cazy_tot_classes_mat_notSignalp_rarefTot <- as.data.frame(cazy_tot_classes_mat_notSignalp_rarefTot %>% ungroup()%>% select(-legio_id))
+rownames(cazy_tot_classes_mat_notSignalp_rarefTot) <- row_names_rarefTot
+cazy_relNumber_dist_notSignalp_rarefTot <- vegan::vegdist(cazy_tot_classes_mat_notSignalp_rarefTot)
+              
+mds_notSignalp_rarefTot <- vegan::metaMDS(cazy_relNumber_dist_notSignalp_rarefTot, trymax = 100, k = 3)        
+
+mds_notSignalp_rarefTot_tbl <- as_tibble(mds_notSignalp_rarefTot$points) %>% mutate(legio_id = rownames(mds_notSignalp_rarefTot$points)) %>% left_join(metadata_red)
+# ggplot(mds_rarefTot_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+#   theme_void() +
+#   axes_3D() + 
+#   stat_3D()
+
+vegan::anosim(cazy_relNumber_dist_notSignalp_rarefTot, mds_notSignalp_rarefTot_tbl %>% pull(genus_cluster))
+# weak significant differences for species info, while no for genus_cluster and isolated (see here though: https://github.com/vegandevs/vegan/discussions/586)
+vegan::adonis2(cazy_relNumber_dist_notSignalp_rarefTot ~ isolated+as.factor(genus_cluster), data = mds_notSignalp_rarefTot_tbl)
+# signicant terms for both genus_cluster and isolated, while interaction not
+```
+
+
+```{r}
+
+common_elements <- intersect(labels(cazy_relNumber_dist_notSignalp_rarefTot), labels(cazy_relNumber_dist_signalp_rarefTot))
+cazy_relNumber_dist_notSignalp_rarefTot_reduced <- usedist::dist_subset(cazy_relNumber_dist_notSignalp_rarefTot, common_elements)
+cazy_relNumber_dist_signalp_rarefTot_reduced <- usedist::dist_subset(cazy_relNumber_dist_signalp_rarefTot, common_elements)
+
+plot(cazy_relNumber_dist_notSignalp_rarefTot_reduced, cazy_relNumber_dist_signalp_rarefTot_reduced)
+vegan::mantel(cazy_relNumber_dist_notSignalp_rarefTot_reduced, cazy_relNumber_dist_signalp_rarefTot_reduced)
+
+```
+```{r}
+phylodist <- as.dist(cophenetic.phylo(tree))
+
+common_elements_notSignalp_phylo <- intersect(labels(cazy_relNumber_dist_notSignalp_rarefTot), labels(phylodist))
+cazy_relNumber_dist_notSignalp_rarefTot_reduced_phylo <- usedist::dist_subset(cazy_relNumber_dist_notSignalp_rarefTot, common_elements_notSignalp_phylo)
+phylodist_reduced_notSignalp <- usedist::dist_subset(phylodist, common_elements_notSignalp_phylo)
+plot(phylodist_reduced_notSignalp, cazy_relNumber_dist_notSignalp_rarefTot_reduced_phylo)
+vegan::mantel(phylodist_reduced_notSignalp, cazy_relNumber_dist_notSignalp_rarefTot_reduced_phylo)#
+# weak correlation between cazymes without signalp and phylodist (r = 0.295, p-val = 0.001)
+
+common_elements_signalp_phylo <- intersect(labels(cazy_relNumber_dist_signalp_rarefTot), labels(phylodist))
+cazy_relNumber_dist_signalp_rarefTot_reduced_phylo <- usedist::dist_subset(cazy_relNumber_dist_signalp_rarefTot, common_elements_signalp_phylo)
+phylodist_reduced_signalp <- usedist::dist_subset(phylodist, common_elements_signalp_phylo)
+plot(phylodist_reduced_signalp, cazy_relNumber_dist_signalp_rarefTot_reduced_phylo)
+vegan::mantel(phylodist_reduced_signalp, cazy_relNumber_dist_signalp_rarefTot_reduced_phylo)#
+# weak correlation between cazymes without signalp and phylodist (r = 0.32, p-val = 0.001)
+
+```
+
+
+```{r}
+
+dbcansub_tot_metadata <- dbcansub_tot %>% left_join(metadata_red) %>% left_join(signalp_results %>% select(`Gene ID`, signal_pep))
+dbcansub_ident <- dbcansub_tot_metadata %>% filter(Substrate != "-")
+
+dbcansub_metadata <- dbcansub_tot_metadata %>% select(legio_id, species_cluster, strain_cluster, gtdbtk.classification, species_info, isolated, genus_cluster, `Gene ID`, `dbCAN subfam`, `Subfam Composition`, `Subfam EC`, Substrate, signal_pep)
+write_tsv(dbcansub_metadata, paste0(data_dir,"/dbcan_results/dbcansub_metadata.tsv"))
+
+dbcansub_ident_noRedund <- dbcansub_ident %>% separate_longer_delim(Substrate, delim = ", ") %>% 
+  group_by(`Gene ID`, Substrate, legio_id) %>% 
+  sample_n(1) # select only one entry for each cazyme for each substrate (to avoid double counting)
+dbcansub_ident_noRedund_summ <- dbcansub_ident_noRedund %>% 
+  group_by(Substrate, legio_id) %>% 
+  summarise(n = n()) %>% 
+  left_join(metadata_red)
+
+dbcansub_ident_noRedund_summ %>% 
+  ggplot(aes(Substrate, legio_id, fill = n, col = isolated)) + 
+  geom_tile() +
+  facet_wrap(~genus_cluster, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+
+```
+
+```{r}
+dbcansub_ident_noRedund_summ %>% filter(str_detect(tax_short, "pneu|long" )) %>% 
+  ggplot(aes(Substrate, legio_id, fill = n, col = isolated)) + 
+  geom_tile() +
+  facet_wrap(~genus_cluster, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+# TO DO: use all cazymes, not just predicted substrates
+```
+
+
+# ```{r}
+# # Beta diversity using relative abundances
+# cazy_tot_classes_mat <- cazy_tot_classes %>% 
+#   group_by(legio_id) %>% 
+#   mutate(tot_cazymes = n()) %>% 
+#   ungroup() %>% 
+#   group_by(legio_id, cazy_class) %>% 
+#   summarise(n = n()/unique(tot_cazymes)) %>% 
+#   pivot_wider(names_from = cazy_class, values_from = n)
+# cazy_tot_classes_mat[is.na(cazy_tot_classes_mat)] <- 0
+# 
+# row_names <- cazy_tot_classes_mat$legio_id
+# cazy_tot_classes_mat <- as.data.frame(cazy_tot_classes_mat %>% ungroup()%>% select(-legio_id))
+# rownames(cazy_tot_classes_mat) <- row_names
+# cazy_relNumber_dist <- vegan::vegdist(cazy_tot_classes_mat)
+#               
+# mds <- vegan::metaMDS(cazy_tot_classes_mat, trymax = 100, k = 3)        
+# 
+# mds_tbl <- as_tibble(mds$points) %>% mutate(legio_id = rownames(mds$points)) %>% left_join(metadata_red)
+# # ggplot(mds_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = species_info)) +
+# #   theme_void() +
+# #   axes_3D() + 
+# #   stat_3D()
+# 
+# library(usedist)
+# cazy_relNumber_dist_g1 <- dist_subset(cazy_relNumber_dist, mds_tbl %>% filter(genus_cluster == 1) %>% pull(legio_id))
+# vegan::anosim(cazy_relNumber_dist_g1, mds_tbl %>% filter(genus_cluster == 1) %>% pull(isolated))
+# # Still differences between isolated vs non-isolated genomes
+# ```
+# ```{r}
+# # # Beta diversity rarefying the number of CAZYmes to a common value within genus
+# # cazy_tot_classes_genus <- cazy_tot_classes %>% 
+# #   left_join(metadata_red %>% select(legio_id, genus_cluster)) %>% 
+# #   group_by(legio_id) %>% 
+# #   mutate(n_cazymes_genome = n()) %>% 
+# #   group_by(genus_cluster) %>% 
+# #   mutate(min_n_cazymes_in_genus = min(n_cazymes_genome)) %>% 
+# #   group_by(legio_id) 
+# # 
+# # cazy_tot_classes_rarefGenus <- tibble()
+# # for (i in 1:max(cazy_tot_classes_mat_genus$genus_cluster)){
+# #   temp <- cazy_tot_classes_genus %>% filter(genus_cluster == i) 
+# #   min_n_cazymes <- unique(temp$min_n_cazymes_in_genus)
+# #   temp <- temp %>% 
+# #     group_by(legio_id) %>% sample_n(min_n_cazymes)
+# #   cazy_tot_classes_rarefGenus <- bind_rows(cazy_tot_classes_rarefGenus, temp) 
+# # }
+# # 
+# # cazy_tot_classes_mat_rarefGenus <- cazy_tot_classes_rarefGenus %>% 
+# #   group_by(legio_id, cazy_class) %>% 
+# #   summarise(n = n()) %>% 
+# #   pivot_wider(names_from = cazy_class, values_from = n)
+# # cazy_tot_classes_mat_rarefGenus[is.na(cazy_tot_classes_mat_rarefGenus)] <- 0
+# # 
+# # row_names_rarefGenus <- cazy_tot_classes_mat_rarefGenus$legio_id
+# # cazy_tot_classes_mat_rarefGenus <- as.data.frame(cazy_tot_classes_mat_rarefGenus %>% ungroup()%>% select(-legio_id))
+# # rownames(cazy_tot_classes_mat_rarefGenus) <- row_names_rarefGenus
+# # cazy_relNumber_dist_rarefGenus <- vegan::vegdist(cazy_tot_classes_mat_rarefGenus)
+# #               
+# # mds_rarefGenus <- vegan::metaMDS(cazy_tot_classes_mat_rarefGenus, trymax = 100, k = 3)        
+# # 
+# # mds_rarefGenus_tbl <- as_tibble(mds_rarefGenus$points) %>% mutate(legio_id = rownames(mds_rarefGenus$points)) %>% left_join(metadata_red)
+# # # ggplot(mds_rarefGenus_tbl, aes(x = MDS1, y = MDS2, z = MDS3, col = as.factor(genus_cluster))) +
+# # #   theme_void() +
+# # #   axes_3D() + 
+# # #   stat_3D()
+# # 
+# # vegan::anosim(cazy_relNumber_dist_rarefGenus, mds_rarefTot_tbl %>% pull(genus_cluster))
+# # vegan::adonis2(cazy_relNumber_dist_rarefGenus ~ as.factor(genus_cluster)*isolated, data = mds_rarefGenus_tbl)
+# # # signicant terms for both genus_cluster and isolated, while interaction not
+# ```

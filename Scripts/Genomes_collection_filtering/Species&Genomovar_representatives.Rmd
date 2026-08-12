@@ -1,0 +1,191 @@
+---
+title: "Strain&Species representatives selection "
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggsankey)
+library(MetBrewer)
+```
+
+```{r}
+main_folder <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/"
+
+secondaryCluster_result <- read_tsv(paste0(main_folder,"Data/secondaryCluster_total.tsv"))
+LegioID_genomesTableNR_info <- read_delim(paste0(main_folder,"Data/LegioID_genomesTableNR_QCfiltered_manRef.tsv"), 
+    delim = "\t", escape_double = FALSE, 
+    col_types = cols(accession_gem = col_character(), 
+        accession_mgnify = col_character(), 
+        accession_oceandna = col_character(), 
+        buck2021_bin_id = col_character(), 
+        zhou2022_bin_id = col_character(), 
+        pintolab_dw_bin_id = col_character(), 
+        environmental_medium = col_character(), 
+        geographic_origin = col_character(), 
+        biome = col_character()), trim_ws = TRUE)
+
+LegioID_genomesTableNR_info <- LegioID_genomesTableNR_info %>% rename(scientific_name.ncbi = scientific_name, strain.ncbi = strain)
+
+secondaryCluster_result_info <- secondaryCluster_result %>% rename(legio_id = LegioID) %>% 
+  left_join(LegioID_genomesTableNR_info %>% select(legio_id, accession_assembly, scientific_name.ncbi, strain.ncbi, checkm2.Completeness, checkm2.Contamination, checkm2.Contig_N50, checkm2.Genome_Size, gtdbtk.classification))
+```
+
+```{r}
+cols <-met.brewer("Austria", 10, direction = -1)
+
+LegioID_genomesTableNR_info %>% 
+  group_by(gtdbtk.classification) %>% 
+  mutate(n = n(),
+         groupedClassification = ifelse(n < 10, "Other", gsub("s__","",word(gtdbtk.classification, 7, sep = ";"))),
+         groupedClassification = case_when(groupedClassification == "" ~ "Unclassified Legionella spp.",
+                                           str_detect(groupedClassification, "GCA") ~ "Unnamed Legionella spp.",
+                                           str_detect(groupedClassification, "_C taurinensis") ~ "Legionella taurinensis",
+                                           TRUE ~ groupedClassification),
+         groupedClassification = factor(groupedClassification, levels = c("Legionella anisa", "Legionella dumoffii",  "Legionella fraseri", "Legionella longbeachae", "Legionella pascullei", "Legionella pneumophila", "Legionella taurinensis", "Unnamed Legionella spp.", "Unclassified Legionella spp.", "Other" ))) %>% 
+  ggplot(aes(x = "", y = groupedClassification, fill= groupedClassification)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  scale_fill_manual(values = cols) +
+  theme_void() + labs(fill = "")#+  theme(legend.position = "none")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/filteredGenomes_pieChart.pdf", dpi = 600)
+
+```
+
+```{r}
+secondaryCluster_result_info %>% group_by(genomovar_cluster) %>% summarise(n = n()) %>% 
+  ggplot(aes(genomovar_cluster, n)) + geom_col() + scale_y_log10()
+secondaryCluster_result_info %>% group_by(species_cluster) %>% summarise(n = n()) %>% 
+  ggplot(aes(species_cluster, n)) + geom_col() + scale_y_log10()
+secondaryCluster_result_info %>% group_by(species_cluster) %>% summarise(n_genomovar = length(unique(genomovar_cluster))) %>% 
+  ggplot(aes(species_cluster, n_genomovar)) + geom_col() + scale_y_log10(breaks = c(1,2,3,5,10,100,1000))
+# Most species have just one genomovar and one genome, except for L.pneumophila
+
+```
+```{r}
+df <- secondaryCluster_result_info %>% make_long(species_cluster, genomovar_cluster)
+
+ggplot(df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey() +
+  theme_sankey(base_size = 16) + theme(legend.position = "none")
+  
+species_genomovar_info <- secondaryCluster_result_info %>% group_by(genomovar_cluster) %>% 
+  summarise(n_species = length(unique(species_cluster)),
+            species_names = paste0(unique(species_cluster), collapse = ";"))
+species_genomovar_info %>% view()
+# All genomes in each strain are just included in a single species. Good!
+# So let's modify the strain codename to include the species 9e.g., primaryCluster_speciesCluster_genomovarCluster)
+
+secondaryCluster_result_info <- secondaryCluster_result_info %>% 
+  mutate(temp = word(genomovar_cluster, 2, sep = "_"),
+    genomovar_cluster = paste(species_cluster, temp, sep = "_")) %>% 
+  select(-temp) 
+```
+
+```{r}
+
+speciesClusters_scientific_names <- secondaryCluster_result_info %>% group_by(species_cluster) %>% 
+  mutate(scientific_name.ncbi = word(scientific_name.ncbi, start = 1, end = 2)) %>% 
+  summarise(n = n(), ncbi_metadata_species_n = length(unique(scientific_name.ncbi)), ncbi_metadata_species = paste0(unique(scientific_name.ncbi), collapse = ";")) %>% 
+  mutate(NA_detected = as.numeric(str_detect(ncbi_metadata_species, "NA")), ncbi_metadata_species_n_noNA = ncbi_metadata_species_n - NA_detected)
+
+speciesClusters_scientific_names %>% 
+  ggplot(aes(ncbi_metadata_species_n_noNA)) + geom_histogram() + xlab("Number of different species included in cluster based on NCBI metadata (0 = no info on species)")
+# In most cases species level clustering is consistent with NCBI metadata -> good!
+# Most of results with 2 different species are due to the presence of general classifications such as "Legionella sp." in the same cluster with species-level information
+
+
+# In a few cases we have clusters which contain multiple different species
+conflictingclusters <- speciesClusters_scientific_names %>% filter(ncbi_metadata_species_n_noNA > 1 & !str_detect(ncbi_metadata_species, "sp."))
+secondaryCluster_result_info %>% filter(species_cluster %in% conflictingclusters$species_cluster & !is.na(scientific_name.ncbi)) %>% view()
+
+## Manual check of incosistencies
+# Legio04791 (only L.longbeacheae in L.oakridgensis cluster): inconclusive check on NCBI taxonomy and also too small so likely missannotation (https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_900461575.1/) 
+# Legio02426 (only L.pneumophila in L.longbeacheae cluster): failed NCBI taxonomy check and flagged as too large genome so likely missannotaion (https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_018488045.1/)
+# Legio03574 (only L.oakridgensis in L.longbeacheae cluster: failed NCBI taxonomy check and flagged as too large genome so likely missannotaion (https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_900636495.1/)
+
+
+# Same test with GTDB-Tk taxonomy
+speciesClusters_scientific_tax <- secondaryCluster_result_info %>% group_by(species_cluster) %>% 
+  summarise(n = n(), different_tax_n = length(unique(gtdbtk.classification)), ncbi_metadata_species = paste0(unique(gtdbtk.classification), collapse = ";;;")) 
+# Only one GTDB-Tk taxonomy per cluster: good!
+
+# Check now many species-level clusters have same taxonomy 
+tax_speciesClusters <- secondaryCluster_result_info %>% group_by(gtdbtk.classification) %>% 
+  summarise(n_different_clusters = length(unique(species_cluster)), species_clusters = paste0(unique(species_cluster), collapse = ";"))
+# The only taxonomic annotations which encompass multiple species-level clusters are the ones not assigned to any species, but only up to the genus level. Makes sense
+```
+
+
+```{r}
+# Scores 
+A <- 1 # Completeness
+B <- 5 # Contamination
+C <- 0 # Strains heterogeneity
+D <- 0.5 # N50
+E <- 0 # Size
+F_ <- 1 # Centrality
+
+secondaryCluster_result_info <- secondaryCluster_result_info %>% 
+  mutate(ANI_mean_wrt_species_secondaryCluster = ifelse(is.na(ANI_mean_wrt_species_secondaryCluster), 100, ANI_mean_wrt_species_secondaryCluster),
+         ANI_mean_wrt_genomovar_secondaryCluster = ifelse(is.na(ANI_mean_wrt_genomovar_secondaryCluster), 100, ANI_mean_wrt_genomovar_secondaryCluster)) %>% 
+  mutate(Score_species = A*checkm2.Completeness - B*checkm2.Contamination - C*(checkm2.Contamination) + D*log10(checkm2.Contig_N50) + E*log10(checkm2.Genome_Size) + F_*(ANI_mean_wrt_species_secondaryCluster)/100,
+         Score_genomovar = A*checkm2.Completeness - B*checkm2.Contamination - C*(checkm2.Contamination) + D*log10(checkm2.Contig_N50) + E*log10(checkm2.Genome_Size) + F_*(ANI_mean_wrt_genomovar_secondaryCluster)/100)
+
+
+secondaryCluster_result_info %>% ggplot(aes(species_cluster, Score_species, fill = species_cluster)) + geom_boxplot() #+ scale_y_sqrt()
+
+speciesRepresentatives <- secondaryCluster_result_info %>% group_by(species_cluster) %>% mutate(n_genomes_species = n(), n_genomovars = length(unique(genomovar_cluster))) %>% filter(Score_species == max(Score_species)) 
+strainsRepresentatives <- secondaryCluster_result_info %>% group_by(genomovar_cluster) %>% mutate(n_genomes_genomovar = n()) %>% filter(Score_species == max(Score_species)) %>% select(-contains("specie"))
+# Sometimes there are ties in the scores -> select randomly one genome per genomovar_cluster and species_cluster
+strainsRepresentatives <- strainsRepresentatives %>% slice(1)
+speciesRepresentatives <- speciesRepresentatives %>% slice(1)
+
+speciesRepresentatives %>% ggplot(aes(n_genomovars)) + geom_histogram() + scale_x_log10()
+```
+
+```{r}
+# Write species and strain representatives
+write_tsv(speciesRepresentatives, paste0(main_folder,"Data/LegioID_speciesRepresentatives.tsv"))
+write_tsv(strainsRepresentatives, paste0(main_folder,"Data/LegioID_genomovarsRepresentatives.tsv"))
+
+```
+
+```{r}
+# Some species-level clusters (attributed to Legionella pneumophila) have too many strain-level clusters compared to other species. We downsample them to only 4 which is equal to the maximum number in other species
+# This happens for species: 42_1 (213 strains), 42_2 (33 strains)
+# Methods for selection:
+# - Species-level representative
+# - Strains with the highest number of genomes
+# - Strains of interest (e.g., serogroup 1)
+
+# The numbers representing strain cluster have been estimated on the entire primary cluster, so this means that given species-level clusters will not have all the strain number from 0 to max(genomovar_cluster)
+
+strainsRepresentatives_exceptAbundantStrains <- strainsRepresentatives %>% filter(!(str_detect(genomovar_cluster, "42_1|42_2")))
+
+# 42_1 species: select species-level representative, 3 strains with abundant number of genomes 
+strainsRepresentatives_speciesRepresentative_42_1 <- strainsRepresentatives %>% 
+  filter(legio_id == (speciesRepresentatives %>% filter(species_cluster == "42_1") %>% pull(legio_id)))
+strainsRepresentatives_abundantStrains_42_1 <- strainsRepresentatives %>% filter(str_detect(genomovar_cluster, "42_1")) %>% 
+  arrange(desc(n_genomes_genomovar)) %>% ungroup() %>% 
+  slice(1:3)
+
+
+# 42_2 species: select species-level representative and 3 strains with abundant number of genomes 
+strainsRepresentatives_speciesRepresentative_42_2 <- strainsRepresentatives %>% 
+  filter(legio_id == (speciesRepresentatives %>% filter(species_cluster == "42_2") %>% pull(legio_id)))
+strainsRepresentatives_abundantStrains_42_2 <- strainsRepresentatives %>% filter(str_detect(genomovar_cluster, "42_2")) %>% 
+  arrange(desc(n_genomes_genomovar)) %>% ungroup() %>% 
+  slice(1:3)
+
+legionomeGenomes <- strainsRepresentatives_exceptAbundantStrains %>% 
+  bind_rows(strainsRepresentatives_speciesRepresentative_42_1, strainsRepresentatives_abundantStrains_42_1) %>% 
+  bind_rows(strainsRepresentatives_speciesRepresentative_42_2, strainsRepresentatives_abundantStrains_42_2)
+
+write_tsv(legionomeGenomes, paste0(main_folder,"Data/LegioID_legionomePangenome_NEW.tsv"))
+
+```

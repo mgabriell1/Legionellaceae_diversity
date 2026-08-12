@@ -1,0 +1,174 @@
+---
+title: "Dot/Icm components BLASTp"
+output: html_notebook
+---
+
+Check for the detection of Dot/Icm proteins with homology to the ones of L. pneumophila paris, used as model 
+
+```{r message=FALSE}
+library(rBLAST)
+library(Biostrings)
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r import Legionome gnomes info}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+LegioInfo_red <- LegioInfo %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, species_info, genus_cluster)
+
+aai_vs_Lp <- read_tsv("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/legionome_ANI_AAI/AAI_vs_Lpneumophila.tsv")
+
+```
+
+```{r}
+DotIcm_files <- list.files(path = paste0(data_dir,"referenceProteins/T4SS_DotIcm/Lpneumophila_paris_referenceProteins"), full.names = TRUE)
+legionome_protFiles <- paste0(data_dir,"/proteinFolder_legionome/legiomePangenome_allProteins.fasta")
+
+```
+
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot <- tibble()
+
+for (i in 1:length(DotIcm_files)){
+  SScomponent <- readAAStringSet(DotIcm_files[i])
+  print(DotIcm_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".seq","",word(DotIcm_files[i], 11, sep = "/")),
+                                    legioid = word(sseqid, 1, sep = "_")) %>% 
+  group_by(legioid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+  filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+
+
+  
+  
+  blastp_res_tot <- blastp_res_tot %>% bind_rows(blastp_res)
+}
+
+write_tsv(blastp_res_tot, paste0(data_dir, "/referenceProteins/T4SS_DotIcm/T4SS_DotIcm_Lpneumophila_blastp.tsv"))
+
+```
+
+```{r}
+blastp_res_tot <- read_tsv(paste0(data_dir, "/referenceProteins/T4SS_DotIcm/T4SS_DotIcm_Lpneumophila_blastp.tsv"))
+
+blastp_res_tot_summay <- blastp_res_tot %>% group_by(legioid) %>% 
+  summarise(n_components = n(), avg_pident = mean(pident))
+LegioInfo_red_blastp_summary <- LegioInfo_red %>% left_join(blastp_res_tot_summay, by = c("legio_id" = "legioid"))
+LegioInfo_red_blastp_summary <- LegioInfo_red_blastp_summary %>% left_join(aai_vs_Lp, by = c("legio_id" = "legioid_ref")) %>% 
+  group_by(genus_cluster) %>% mutate(avgGenus_AAI_vs_Lpneumophila = mean(AAI_vs_Lpneumophila))
+
+LegioInfo_red_blastp_summary %>% 
+  ggplot(aes(reorder(genus_cluster, -avgGenus_AAI_vs_Lpneumophila, mean), avg_pident, group = genus_cluster)) +
+  #geom_boxplot() +
+  geom_jitter(aes(col = AAI_vs_Lpneumophila)) +#, shape = species_info
+  labs(x = "Genus cluster", y = "Average percentage identity [%]", col = "AAI compared to <br> *L. pneumophila*") +
+  theme(axis.text.x = element_blank(), legend.title = ggtext::element_markdown())
+# Values above 90% pident are linked to L pneumophila and other genomes traditionally linked to subspecies plus 2 not named species
+
+```
+
+```{r}
+LegioInfo_red_blastp_summary %>% 
+  ggplot(aes(AAI_vs_Lpneumophila, avg_pident)) + 
+  geom_point() +
+  geom_abline(a = 0 ,b = 1) + lims(x = c(45,100), y = c(45,100))
+
+t.test(LegioInfo_red_blastp_summary$avg_pident, LegioInfo_red_blastp_summary$AAI_vs_Lpneumophila, paired = TRUE) 
+# Dot/Icm components are more conserved than the whole genome on average
+
+#write_tsv(LegioInfo_red_blastp_summary, paste0(data_dir, "/referenceProteins/T4SS_DotIcm/LegioInfo_dotIcm_summary.tsv"))
+```
+
+```{r}
+blastp_res_tot_info <- blastp_res_tot %>% left_join(LegioInfo_red, by = c("legioid" = "legio_id")) 
+blastp_res_tot_info %>% 
+  ggplot(aes(Target, pident)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))#+
+  #facet_wrap(~genus_cluster)
+
+
+```
+
+
+```{r}
+allDotIcm_components <- gsub(".seq","",word(DotIcm_files, 11, sep = "/"))
+
+missing_DotIcm_components_binary <- blastp_res_tot %>% select(legioid, Target, pident)%>% pivot_wider(names_from = Target, values_from = pident) %>%  mutate(across(!legioid, function(x){ifelse(is.na(x), 0, 1)}))
+UpSetR::upset(as.data.frame(missing_DotIcm_components_binary),nsets = 28, nintersects = 50)
+
+missing_DotIcm_components_binary_info <- missing_DotIcm_components_binary %>% 
+  mutate(Total = rowSums(select_if(., is.numeric), na.rm = TRUE)) %>% 
+  dplyr::rename(legio_id = legioid) %>% 
+  left_join(LegioInfo) %>% 
+  mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_"))
+
+missing_DotIcm_components_binary_info %>% 
+  filter(Total == 27) %>% view() # only genomes with all proteins
+
+missing_DotIcm_components_binary_info %>% 
+  filter(Total == 26) %>% pull(species_cluster) %>% unique() %>% length() # only species with all proteins except IcmR
+
+missing_DotIcm_components_binary_info %>% 
+  filter(Total == 25 & icmK_dotH == 0) %>% view() #only genomes with all proteins except IcmR and IcmK/dotH
+missing_DotIcm_components_binary_info %>% 
+  filter(Total == 25 & icmK_dotH == 0) %>% pull(gtdbtk.classification) %>% unique() %>% length()
+  
+missing_DotIcm_components_binary_info %>% 
+  ggplot(aes(checkm2.Completeness, Total, col = isolated)) +
+  geom_point()
+cor.test(missing_DotIcm_components_binary_info$Total, missing_DotIcm_components_binary_info$checkm2.Completeness, method = "spearman")
+
+missing_DotIcm_components_binary %>% filter(icmR == 0 & icmK_dotH == 0) %>% select(legioid) %>% 
+  left_join(LegioInfo_red, by = c("legioid" = "legio_id")) %>% 
+  ggplot(aes(genus_cluster)) +
+  geom_bar()
+```
+
+```{r}
+
+LegioInfo_red_blastp_summary %>% 
+  group_by(genus_cluster) %>% 
+  mutate(tot_species_genus = length(unique(species_cluster))) %>% 
+  filter(n_components == 26) %>% 
+  summarise(n = n(),
+            n_species = length(unique(species_cluster)),
+            tot_species_genus = unique(tot_species_genus))
+
+LegioInfo_red_blastp_summary %>% 
+  group_by(genus_cluster) %>% 
+  mutate(tot_species_genus = length(unique(species_cluster))) %>% 
+  filter(n_components == 25) %>% 
+  summarise(n = n(),
+            n_species = length(unique(species_cluster)),
+            tot_species_genus = unique(tot_species_genus))
+```
+
+```{r}
+missing_DotIcm_components_binary_info %>% 
+  mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster) %>% 
+  summarise(var_proteins_number = sd(Total))
+
+```
+
+```{r}
+blastp_res_tot %>% 
+  ggplot(aes(Target, pident)) + 
+  geom_boxplot()
+
+blastp_res_tot %>% 
+  rstatix::anova_test(pident ~ Target)
+
+res <- blastp_res_tot %>% 
+  rstatix::tukey_hsd(pident ~ Target)
+
+```

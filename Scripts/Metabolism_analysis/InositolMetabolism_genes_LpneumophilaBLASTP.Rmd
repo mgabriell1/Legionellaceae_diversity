@@ -1,0 +1,99 @@
+---
+title: "Myo-inositol genes homologs of Lp"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ape)
+library(ciTools)
+library(rBLAST)
+library(Biostrings)
+rm(list = ls())
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster)
+
+gene_families <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/gene_families.tsv"), col_names = FALSE)
+colnames(gene_families) <- c("gene_family", "prot_id", "frag")
+
+```
+
+```{r}
+prot_files <- list.files(path = paste0(data_dir,"/referenceProteins/Inositol_metabolism/LPneumophila_paris_referenceProteins"), full.names = TRUE)
+legionome_protFiles <- paste0(data_dir,"/proteinFolder_legionome/legiomePangenome_allProteins.fasta")
+
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+
+```
+
+```{r}
+
+blastp_res_tot_raw <- tibble()
+
+for (i in 1:length(prot_files)){
+  SScomponent <- readAAStringSet(prot_files[i])
+  print(prot_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".seq","",word(prot_files[i], 12, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) 
+  blastp_res_tot_raw <- blastp_res_tot_raw %>% bind_rows(blastp_res)
+}
+
+blastp_res_tot <- blastp_res_tot_raw %>% 
+    group_by(legioid, Target) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) #%>% 
+    #filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+
+#write_tsv(blastp_res_tot, paste0(data_dir,"/referenceProteins/Inositol_metabolism/InositolMetabolism_blastp_lp_paris_results.tsv"))
+
+```
+
+```{r}
+blastp_res_tot <- read_tsv(paste0(data_dir,"/referenceProteins/Inositol_metabolism/InositolMetabolism_blastp_lp_paris_results.tsv"))
+
+blastp_res_tot <- blastp_res_tot %>% mutate(prot_id = word(sseqid, start = 2, end = 3, sep = "_")) %>% 
+  left_join(gene_families %>% select(-frag))
+
+# homologs to lpp1624 (iolT) belong to three protein families, but the representative have all a sugar transporter PFAM signature,
+# still almoost only the OAGGDK_06415 family is found to be present together with iolG and iolE
+
+all_homologs <- blastp_res_tot %>% group_by(Target, gene_family) %>% 
+  summarise(n_genomes_all = length(unique(legioid)), pident_mean_all = mean(pident))
+
+best_homologs <- blastp_res_tot %>% group_by(Target, legioid) %>% 
+  filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) %>% 
+  group_by(Target, gene_family) %>% 
+  summarise(n_genomes_best = length(unique(legioid)), pident_mean_best = mean(pident))
+
+all_homologs %>% left_join(best_homologs) %>% 
+  write_tsv(paste0(data_dir,"/referenceProteins/Inositol_metabolism/InositolMetabolism_all_vs_best_homologs.tsv"))
+```
+
+```{r}
+blastp_res_tot_wide <- blastp_res_tot %>% group_by(Target, legioid) %>% 
+  filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) %>% 
+  select(legioid, gene_family) %>% 
+  pivot_wider(values_from = gene_family, names_from = Target)
+
+
+metadata_red_Inositol <- metadata_red %>% left_join(blastp_res_tot_wide, by = c("legio_id" = "legioid"))
+# Mostly species belonging to genera 1 and 6 have both myo-inositol transporter and the metabolic gene belonging to both known pathogenic and not species
+metadata_red_Inositol <- metadata_red_Inositol %>% mutate(itol_value = ifelse(!is.na(lpp1624) & !is.na(iolG), 1, -1))
+
+metadata_red_Inositol %>% pivot_longer(c(iolE, lpp1624, iolG)) %>% group_by(species_cluster, name) %>% summarise(gene_families = paste0(value, collapse = ", "), n_gene_families = length(unique(value))) %>% filter(n_gene_families > 1)
+# There can be differences within species (i.e., L. geestiana)
+
+write_tsv(metadata_red_Inositol, paste0(data_dir,"/referenceProteins/Inositol_metabolism/InositolMetabolism_LegioInfo.tsv"))
+
+
+```

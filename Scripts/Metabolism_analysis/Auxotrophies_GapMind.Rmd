@@ -1,0 +1,152 @@
+---
+title: "Legionella auxotrophies"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r message=FALSE}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+
+gapmind_path_files <- list.files(paste0(data_dir,"GapMind_results"), pattern = "path", full.names = TRUE)
+gapmind_reqs_files <- list.files(paste0(data_dir,"GapMind_results"), pattern = "req", full.names = TRUE)
+
+gapmind_path <- read_csv(gapmind_path_files, id = "filename")
+gapmind_path <- gapmind_path %>% mutate(legio_id = word(word(filename, 9, sep = "/"), 1, sep = "_"))
+gapmind_path_info <- gapmind_path %>% left_join(LegioInfo)
+
+gapmind_reqs_list <- list()
+for (i in 1:length(gapmind_reqs_files)){
+  #print(gapmind_reqs_files[i])
+  gapmind_reqs_fileSize <- file.info(gapmind_reqs_files[i])$size
+  if (gapmind_reqs_fileSize > 0){
+      gapmind_reqs_tmp <- read_csv(gapmind_reqs_files[i], id = "filename")
+  }
+  gapmind_reqs_list[[i]] <- gapmind_reqs_tmp
+}
+gapmind_reqs <- bind_rows(gapmind_reqs_list) %>% mutate(legio_id = word(word(filename, 9, sep = "/"), 1, sep = "_"))
+gapmind_reqs <- gapmind_path_info %>% distinct(legio_id) %>% left_join(gapmind_reqs) %>% left_join(LegioInfo)
+
+
+
+```
+
+```{r}
+gapmind_path_info_pathAll <- gapmind_path_info %>% filter(ruleId == "all") %>% 
+  mutate(pathway_classification = case_when(nLo > 0 ~ "Low confidence",
+                                            nLo == 0 & nMed > 0 ~ "Medium confidence",
+                                            nLo ==0 & nMed == 0 & nHi > 0 ~ "High confidence"),
+         pathway_classification = factor(pathway_classification, levels = c("High confidence", "Medium confidence", "Low confidence")))
+
+gapmind_path_info_pathAll <- gapmind_path_info_pathAll %>% 
+  mutate(pathwayId_long = case_when(pathwayId == "arg" ~ "L-arginine",
+                               pathwayId == "asn" ~ "L-asparagine",
+                               pathwayId == "chorismate" ~ "Chorismate",
+                               pathwayId == "cys" ~ "L-cysteine",
+                               pathwayId == "gln" ~ "L-glutamine",
+                               pathwayId == "gly" ~ "Glycine",
+                               pathwayId == "his" ~ "L-histidine",
+                               pathwayId == "ile" ~ "L-isoleucine",
+                               pathwayId == "leu" ~ "L-leucine",
+                               pathwayId == "lys" ~ "L-lysine",
+                               pathwayId == "met" ~ "L-methionine",
+                               pathwayId == "phe" ~ "L-phenylalanine",
+                               pathwayId == "pro" ~ "L-proline",
+                               pathwayId == "ser" ~ "L-serine",
+                               pathwayId == "thr" ~ "L-threonine",
+                               pathwayId == "trp" ~ "L-tryptophan",
+                               pathwayId == "tyr" ~ "L-tyrosine",
+                               pathwayId == "val" ~ "L-valine"),
+         pathwayId_long = factor(pathwayId_long, levels = c("L-arginine", "L-asparagine", "Chorismate","L-cysteine","L-glutamine", "Glycine","L-histidine","L-isoleucine","L-leucine","L-lysine","L-methionine","L-phenylalanine","L-proline","L-serine","L-threonine","L-tryptophan","L-tyrosine","L-valine"))) 
+
+
+gapmind_n_auxotrophies <- gapmind_path_info_pathAll %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(legio_id, species_cluster, genus_cluster_bestConcordance) %>% 
+  summarise(n_auxotrophies = sum(pathway_classification == "Low confidence"))
+gapmind_n_auxotrophies %>% 
+  group_by(n_auxotrophies) %>% summarise(n = n(), n_species = length(unique(species_cluster)))
+
+gapmind_n_auxotrophies %>% 
+  ggplot(aes(as.factor(genus_cluster_bestConcordance), n_auxotrophies)) +
+  geom_violin() +
+  geom_jitter()
+
+gapmind_path_info_pathAll%>% 
+  ggplot(aes(as.factor(genus_cluster_bestConcordance), fill = pathway_classification)) +
+  geom_bar(position="fill") +
+  facet_wrap(~pathwayId_long, ncol = 6) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(y = "Percentage", x = "Genus cluster", fill = "Pathway \nclassification") +
+  scale_fill_manual(values = c("#95c36e", "#f7c267",  "#b64f32"))
+#ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Metabolism/Auxotrophies_GapMind.pdf", dpi = 600, width = 12.5, height = 5.5)
+
+# L oakridgensis was not annotated as being able to produce cysteine with high confidence as serine acetyltransferase it has not been detected.
+# This contradicts the observation of L oakridgensis growth on cyteine-negative plates and the activity of this enzyme (called "Serine transacetylase") in 10.1128/aem.00684-06
+# This is likely missed due to the divergence of cysE in L oakridgensis and E coli. In fact the most similar Loak protein to Ecoli cysE (https://www.genome.jp/entry/eco:b3607) has a percentage identity of only 27.45% and 42% query cover.
+# Still this protein is indicated as "Hexapeptide repeat of succinyl-transferase" by eggNG and "Serine acetyltransferase" by Bakta's annotations
+
+
+gapmind_path_info_pathAll%>% 
+  filter(genus_cluster_bestConcordance == 1) %>% 
+  ggplot(aes(as.factor(genus_cluster_literature), fill = pathway_classification)) +
+  geom_bar(position="fill") +
+  facet_wrap(~pathwayId_long, ncol = 6) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(y = "Percentage", x = "Genus cluster", fill = "Pathway \nclassification") +
+  scale_fill_manual(values = c("#95c36e", "#f7c267",  "#b64f32"))
+# pretty consistent results between genus_lit 1 and 28. In part this division explains the L-proline result in genus cluster 1 and also partl the tryptophan
+
+gapmind_path_info_pathAll %>% select(-c(filename,orgId)) %>% write_tsv(paste0(data_dir,"GapMind_results/GapMind_Legionome_info.tsv"))
+gapmind_path_info_pathAll %>% select(-c(filename,orgId, pathwayId, ruleId, nHi, nMed, nLo, score, expandedPath, path, path2)) %>% pivot_wider(names_from = pathwayId_long, values_from = pathway_classification) %>% write_tsv(paste0(data_dir,"GapMind_results/GapMind_Legionome_info_wide.tsv"))
+```
+
+```{r}
+
+gapmind_path_genus_auxotrophs <- gapmind_path_info_pathAll %>% 
+  group_by(pathwayId, genus_cluster_bestConcordance) %>% 
+  summarise(n_auxotrophs = sum(pathway_classification == "Low confidence"),
+            n_genomes_tot = n())
+
+props_aa_differences <- tibble()
+for (path in unique(gapmind_path_genus_auxotrophs$pathwayId)){
+  props_aa_test <- with(gapmind_path_genus_auxotrophs %>% filter(pathwayId == path), prop.test(n_auxotrophs, n_genomes_tot))
+  props_aa_differences <- props_aa_differences %>% bind_rows(tibble(pathwayId = path, propotest_pval = props_aa_test$p.value, auxotrophs_props = paste(round(props_aa_test$estimate,2), collapse = ",")))
+}
+# There are significant differences in the number of auxotrophs (considered as genomes with pathways with low confidence) for four amino acids: phe, his, arg, pro
+```
+
+```{r}
+gapmind_reqs %>% 
+  group_by(comment) %>% 
+  summarise(n_genomes = length(unique(legio_id)))
+
+# met synthesis is not present in any genome so even though cysteine pathway genomes are likely to be present (medium confidence) the homocysteine required for the pathway to complete is not necessary, indicating that methionine pathway seems to be the bottleneck
+# In the only genome in which cys synthesys is of high confidence (Legionella gormanii) this happens from serine and not from serine-homocysteine as the other genomes, circumventing the requirement for homocysteine presence
+
+```
+
+```{r}
+
+gapmind_path_info_pathAll_speciesVariations <- gapmind_path_info_pathAll %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  group_by(species_cluster, pathwayId) %>% 
+  mutate(n_genomes_species = n()) %>% 
+  filter(n_genomes_species > 1) %>% 
+  group_by(species_cluster, pathwayId, pathway_classification) %>% 
+  summarise(n_genomes_with_confidenceLevel = n(), n_genomes_species = unique(n_genomes_species)) %>% 
+  filter(n_genomes_with_confidenceLevel != n_genomes_species)
+  
+gapmind_path_info_pathAll_speciesVariations %>% pull(species_cluster) %>% unique() %>% length()
+# For 8 species different genomovars have different auxotrophy confidence predictions
+gapmind_path_info_pathAll_speciesVariations %>% filter(pathway_classification == "Low confidence") %>% pull(species_cluster) %>% unique() %>% length()
+# For 5 the change in confidence is between low (auxotroph) to medium (likely not auxotroph)
+gapmind_path_info_pathAll_speciesVariations %>% filter(pathway_classification == "Low confidence") %>% 
+  group_by(pathwayId) %>% summarise(n = n())
+
+```

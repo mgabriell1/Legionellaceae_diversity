@@ -1,0 +1,114 @@
+---
+title: "Check T4SS detected by TXSSscan vs Dot/Icm and CONJscan"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(ape)
+library(usedist)
+theme_set(theme_classic(base_size = 16))
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster)
+
+TXSScan_res_files <- list.files(paste0(data_dir, "/TXSScan_results/Best_solution"), full.names = TRUE)
+TXSScan_res <- read_tsv(TXSScan_res_files, id = "filename", comment = "#")
+TXSScan_res_pT4SS <- TXSScan_res %>% filter(str_detect(model_fqn, "pT4SS"))
+
+CONJscan_res_files <- list.files(paste0(data_dir, "/CONJscan_results/Best_solution"), full.names = TRUE)
+CONJscan_res_files <- CONJscan_res_files[!str_detect(CONJscan_res_files, "Legio03596|Legio03625")] # No systems were detected for those genomes so removed
+CONJscan_res <- read_tsv(CONJscan_res_files, id = "filename", comment = "#")
+
+DotIcm_T4SS_blastRes <- read_tsv(paste0(data_dir, "/referenceProteins/T4SS_DotIcm/T4SS_DotIcm_Lpneumophila_blastp.tsv"))
+```
+
+```{r}
+DotIcm_T4SS_blastRes <- DotIcm_T4SS_blastRes %>% mutate(prot_name = word(sseqid, start = 2, end = 3, sep = "_"))
+DotIcm_T4SS_prots <- DotIcm_T4SS_blastRes %>% pull(prot_name)
+
+TXSScan_res_pT4SS <- TXSScan_res_pT4SS %>% mutate(DotIcm_blast_detected = hit_id %in% DotIcm_T4SS_prots)
+# The pT4SSi of L. gresiliensis is actually the Dot/Icm T4SS
+```
+
+```{r}
+
+TXSScan_res_summary <- read_tsv(paste0(data_dir, "/TXSScan_results/TXSScan_summary_output_tot.tsv"))
+TXSScan_res_summary_pT4SS <- TXSScan_res_summary %>% select(legio_id, contains("pT4SSt")) %>% 
+  mutate(TXSScan_pT4SS = ifelse(TXSScan_pT4SSt > 0, TRUE, FALSE))
+```
+
+```{r}
+CONJscan_res_summary <- read_tsv(paste0(data_dir, "/CONJscan_results/CONJscan_summary_output_tot.tsv"))
+CONJscan_res_summary_T4SS <- CONJscan_res_summary %>% select(legio_id, contains("_T4SS")) %>% 
+  pivot_longer(-legio_id) %>% group_by(name) %>% mutate(n = sum(value > 0)) %>% filter(n > 0) %>% select(-n) %>% pivot_wider(names_from = name, values_from = value)
+CONJscan_res_summary_T4SS <- CONJscan_res_summary_T4SS %>% pivot_longer(-legio_id) %>% group_by(legio_id) %>% mutate(CONJscan_T4SS_types = sum(value > 0)) %>% pivot_wider(names_from = name, values_from = value) %>% 
+  mutate(CONJscan_T4SS = ifelse(CONJscan_T4SS_types > 0, TRUE, FALSE)) 
+```
+
+```{r}
+
+T4SS_TXSScan_CONJscan <- metadata_red %>% left_join(TXSScan_res_summary_pT4SS) %>% left_join(CONJscan_res_summary_T4SS)
+write_tsv(T4SS_TXSScan_CONJscan, paste0(data_dir, "/CONJscan_results/T4SS_TXSScan_CONJscan.tsv"))
+# TXSScan is mostly redundant with Type T in CONJscan. The same proteins are present in both files so I will just use CONJScan (like Gomez-Valero et al., 2019) and not distinguish between pT4SS and cT4SS.
+
+T4SS_TXSScan_CONJscan %>% group_by(TXSScan_pT4SS, CONJscan_T4SS) %>% 
+  summarise(n_genomes = n(), n_species = length(unique(species_cluster)))
+```
+
+```{r}
+T4SS_TXSScan_CONJscan <- read_tsv(paste0(data_dir, "/CONJscan_results/T4SS_TXSScan_CONJscan.tsv"))
+
+tree <- ape::read.tree(paste0(data_dir, "phylogeneticTrees/SUPERMATRIX.partitions.new.nex.treefile"))
+tree$tip.label <- word(tree$tip.label, 1, sep = "_")
+
+T4SS_TXSScan_CONJscan <- T4SS_TXSScan_CONJscan %>% 
+  left_join(tibble(legio_id = tree$tip.label) %>% mutate(order = row_number())) %>% 
+  arrange(order)
+
+CONJscan_mat <- T4SS_TXSScan_CONJscan %>% 
+  filter(CONJscan_T4SS_types > 0) %>% select(CONJScan_T4SS_typeF, CONJScan_T4SS_typeG, CONJScan_T4SS_typeI, CONJScan_T4SS_typeT) %>% as.matrix()
+
+CONJscan_dist <- vegan::vegdist(CONJscan_mat, method = "jaccard", binary = TRUE)
+nmds_CONJ <- vegan::metaMDS(na.omit(CONJscan_dist), d = 2)
+T4SS_TXSScan_CONJscan_nmds <- T4SS_TXSScan_CONJscan %>%  filter(CONJscan_T4SS_types > 0) %>% bind_cols(as_tibble(nmds_CONJ[["points"]]))
+ggplot(T4SS_TXSScan_CONJscan_nmds, aes(MDS1, MDS2, col = as.factor(genus_cluster))) + geom_jitter(width = 0.1, height = 0.1)
+
+vegan::adonis2(CONJscan_dist ~ as.factor(genus_cluster), T4SS_TXSScan_CONJscan %>% filter(CONJscan_T4SS_types > 0))
+vegan::anosim(CONJscan_dist, T4SS_TXSScan_CONJscan %>% filter(CONJscan_T4SS_types > 0) %>% pull(genus_cluster) %>% as.factor())
+
+
+
+phylo_dist <- as.dist(ape::cophenetic.phylo(tree))
+common_elements_phylo <- intersect(T4SS_TXSScan_CONJscan %>% filter(CONJscan_T4SS_types > 0) %>% pull(legio_id), labels(phylo_dist))
+phylo_dist_red <- usedist::dist_subset(phylo_dist, common_elements_phylo)
+vegan::mantel(CONJscan_dist, phylo_dist_red)
+# r = 0.18, p-val < 0.001
+
+```
+
+
+```{r}
+
+
+CONJscan_res_summary_T4SS %>% mutate(T4SS_profile = paste(CONJScan_T4SS_typeF > 0, 
+                                                          CONJScan_T4SS_typeG > 0,
+                                                          CONJScan_T4SS_typeI > 0,
+                                                          CONJScan_T4SS_typeT > 0, sep = "_")) %>% 
+  left_join(metadata_red) %>% 
+  group_by(species_cluster) %>% 
+  summarise(n_genomes = n(), different_T4SS_profiles = length(unique(T4SS_profile))) %>% 
+  filter(n_genomes > 1) %>% 
+  group_by(different_T4SS_profiles > 1) %>% 
+  summarise(n = n())
+# Intra-species variability is high as 19/21 species with multiple genomes present different types of T4ASS
+
+```

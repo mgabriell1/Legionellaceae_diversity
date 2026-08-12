@@ -1,0 +1,402 @@
+---
+title: "Metadata on downloaded genomes"
+output: html_notebook
+---
+
+
+```{r message=FALSE}
+library(tidyverse)
+library(readxl)
+library(MetBrewer)
+library(xml2)
+library(rentrez)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata_Alessio <- read_excel(paste0(data_dir,"Metadata/20230928_Accessions_Metadata.xlsx"))
+metadata_ENA <- read_tsv(paste0(data_dir,"Metadata/Metadata_sampleAccession_ENA.tsv"))
+metadata_gem <- read_tsv(paste0(data_dir,"Metadata/genome_metadata_gem.tsv"))
+legioInfo <- read_tsv(paste0(data_dir,"LegioID_genomesTableNR.tsv"))
+
+
+```
+```{r}
+
+metadata_Alessio_values <- metadata_Alessio %>% #filter(!str_detect(accession_assembly, "GC") & accession_sample == "NA") %>%
+  pivot_longer(c(ecosystem, ecosystem_category, ecosystem_type, environmental_medium, broad_scale_environmental_context)) %>% 
+  select(value) %>% distinct()
+
+metadata_ENA_values <- metadata_ENA %>% pivot_longer(c(broad_scale_environmental_context, description, environment_biome, environment_feature, environment_material, environmental_medium, host, 
+                        isolate, isolation_source, local_environmental_context, sample_title)) %>% distinct(value) %>% filter(!str_detect(value,  "#|NCTC|ERS"))
+
+metadata_gem_values <- metadata_gem %>% filter(str_detect(ecosystem, "Legio")) %>% pivot_longer(c(ecosystem_type, ecosystem_category)) %>% distinct(value)
+
+values_tot <- bind_rows(metadata_Alessio_values, metadata_ENA_values, metadata_gem_values) %>% distinct()
+write_tsv(values_tot, paste0(data_dir,"Metadata/Metadata_values_tot.tsv"))
+```
+
+
+```{r}
+
+values_tot_info <- read_tsv(paste0(data_dir,"Metadata/Metadata_values_tot.tsv"))
+
+metadata_Alessio_info <- metadata_Alessio %>% select(legio_id, ecosystem, ecosystem_category, ecosystem_type, environmental_medium, broad_scale_environmental_context) %>% 
+  pivot_longer(c(ecosystem, ecosystem_category, ecosystem_type, environmental_medium, broad_scale_environmental_context)) %>% 
+  filter(value != "NA") %>% left_join(values_tot_info)
+
+metadata_ENA_info <- metadata_ENA %>% select(sample_accession, broad_scale_environmental_context, description, environment_biome, environment_feature, environment_material, environmental_medium, host, isolate, isolation_source, local_environmental_context, sample_title) %>%
+  pivot_longer(c(broad_scale_environmental_context, description, environment_biome, environment_feature, environment_material, environmental_medium, host, isolate, isolation_source, local_environmental_context, sample_title)) %>% filter(!is.na(value)) %>% left_join(values_tot_info)
+
+metadata_gem_info <- metadata_gem %>% filter(str_detect(ecosystem, "Legio")) %>% select(genome_id, ecosystem_category, ecosystem_type) %>% 
+  pivot_longer(c(ecosystem_category, ecosystem_type)) %>% left_join(values_tot_info)
+
+legioInfo_red <- legioInfo %>% select(legio_id, accession_sample, accession_gem, accession_mgnify, accession_oceandna, buck2021_bin_id, zhou2022_bin_id, pintolab_dw_bin_id, source)
+
+metadata_Alessio_info_legio <- metadata_Alessio_info %>% left_join(legioInfo_red)%>% drop_na(legio_id) %>% select(legio_id, Classification)
+metadata_ENA_info_legio <- metadata_ENA_info %>% left_join(legioInfo_red, by = c("sample_accession" = "accession_sample")) %>% drop_na(legio_id)%>% select(legio_id, Classification)
+metadata_gem_info_legio <- metadata_gem_info %>% left_join(legioInfo_red, by = c("genome_id" = "accession_gem"))%>% drop_na(legio_id)%>% select(legio_id, Classification)
+```
+
+```{r}
+
+metadata_info_legio_raw <- bind_rows(metadata_Alessio_info_legio, metadata_ENA_info_legio, metadata_gem_info_legio)
+metadata_info_legio <- metadata_info_legio_raw %>% group_by(legio_id) %>% 
+  summarise(
+    sources_list = paste(unique(Classification), collapse = ","),
+    genome_source = case_when(str_detect(sources_list, "Clinical") ~ "Clinical",
+                       #str_detect(sources_list, "Host-associated") & !str_detect(sources_list, "Clinical") ~ "Host-associated",
+                       str_detect(sources_list, "Environmental") & !str_detect(sources_list, "-") ~ "Environmental",
+                       str_detect(sources_list, "Environmental-marine") ~ "Environmental-marine",
+                       str_detect(sources_list, "Environmental-freshwater") ~ "Environmental-freshwater",
+                       str_detect(sources_list, "Environmental-soil") ~ "Environmental-soil",
+                       str_detect(sources_list, "Environmental-engineered") | str_detect(sources_list, "Environmental-wastewater") ~ "Environmental-engineered",)) %>% 
+  mutate(genome_source = ifelse(is.na(genome_source), "Unknown", genome_source),
+         genome_source = ifelse(legio_id == "Legio03575", "Environmental", genome_source)) # to remove "host-associated" category as not comparable with others
+
+metadata_info_legio <- metadata_info_legio %>% select(legio_id, genome_source)
+```
+
+```{r}
+
+legioInfo_red_sources <- legioInfo_red %>% left_join(metadata_info_legio)
+legioInfo_red_sources <- legioInfo_red_sources %>% #filter(source == "NCBI_ENA" & is.na(accession_sample)) 
+  mutate(genome_source = case_when(source == "Nishimura2022" ~ "Environmental-marine",
+                                   source == "PintoLab" ~ "Environmental-engineered",
+                                   source == "Zhou2022" ~ "Environmental-freshwater",
+                                   accession_sample == "SAMEA5415342" ~ "Environmental",
+                                   TRUE ~ genome_source)) #%>% 
+  #mutate(genome_source = ifelse(is.na(genome_source), "Unknown", genome_source))
+legioInfo_red_sources <- legioInfo_red_sources %>% left_join(legioInfo %>% select(legio_id, accession_assembly))
+write_tsv(legioInfo_red_sources, paste0(data_dir,"Metadata/legioInfo_red_sources_missingSampleAccessions.tsv"))  
+legioInfo_red_sources$ncbi_info <- NA
+```
+
+
+```{r message=FALSE}
+
+for (i in 1:nrow(legioInfo_red_sources)){
+  print(paste(i, "-", legioInfo_red_sources$legio_id[i]))
+  if (is.na(legioInfo_red_sources$genome_source[i]) & is.na(legioInfo_red_sources$ncbi_info[i])){
+    if (is.na(legioInfo_red_sources$accession_sample[i]) & 
+      legioInfo_red_sources$source[i] == "NCBI_ENA" & 
+      is.na(legioInfo_red_sources$genome_source[i])){
+    id <- entrez_search(db = "assembly", legioInfo_red_sources$accession_assembly[i])
+    summary_temp <- entrez_summary(db="assembly", id$ids)
+    biosampleid_temp <- summary_temp$biosampleid
+    legioInfo_red_sources$accession_sample[i] <- summary_temp$biosampleaccn
+    temp <-entrez_summary(db="biosample", biosampleid_temp, simplify = T)$sampledata
+    legioInfo_red_sources$ncbi_info[i] <- as_tibble(as_list(read_xml(temp))) %>% 
+      unnest_longer(BioSample) %>% filter(BioSample_id == "Attribute") %>% unnest_auto(BioSample) %>% 
+      pull(BioSample) %>% paste(collapse = ";")
+  }else if (legioInfo_red_sources$source[i] == "NCBI_ENA" & 
+      is.na(legioInfo_red_sources$genome_source[i])){
+    id <- entrez_search(db = "biosample", legioInfo_red_sources$accession_sample[i])
+    temp <-entrez_summary(db="biosample", id$ids, simplify = T)$sampledata
+    legioInfo_red_sources$ncbi_info[i] <- as_tibble(as_list(read_xml(temp))) %>% 
+      unnest_longer(BioSample) %>% filter(BioSample_id == "Attribute") %>% unnest_auto(BioSample) %>% 
+      pull(BioSample) %>% paste(collapse = ";")
+  }
+  }
+  
+}
+write_tsv(legioInfo_red_sources, paste0(data_dir,"Metadata/legioInfo_red_sources_missingSampleAccessions_withNCBIdata.tsv"))  
+
+```
+
+```{r}
+
+legioInfo_red_sources_ref <- legioInfo_red_sources %>% 
+  mutate(genome_source = case_when(is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "clinical") ~ "Clinical",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "human|patient") ~ "Clinical",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "lung|respiratory|sputum|bronchial|alveolar") ~ "Clinical",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "freshwater") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "marine") ~ "Environmental-marine",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "soil") ~ "Environmental-soil",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "hot water") ~ "Environmental-engineered",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "tank|tap|sink|shower|distribution system|drinking|building|tower|municipal|artificial water ") ~ "Environmental-engineered",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "wastewater") ~ "Environmental-engineered",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "sapiens") ~ "Clinical",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "home|pool") ~ "Environmental-engineered",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "water isolate") ~ "Environmental",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "river|estuarine") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "spring|pond|lake") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "creek") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "mine ") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "groundwater") ~ "Environmental-freshwater",
+                                   is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "hospital surf") ~ "Environmental-engineered",
+                                  is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "conditioner|machine|heater|thermal") ~ "Environmental-engineered",
+                                  is.na(genome_source) & str_detect(str_to_lower(ncbi_info), "environment") ~ "Environmental",
+                                  is.na(genome_source) & str_detect(str_to_lower(ncbi_info), ";water") ~ "Environmental",
+                                   !is.na(genome_source) ~ genome_source))
+legioInfo_red_sources_ref <- legioInfo_red_sources_ref %>% mutate(genome_source = ifelse(legio_id == "Legio03599", "Environmental", genome_source)) # Such assembly derives from zebrafish gut so hits linked to clinical settings are false positive
+legioInfo_red_sources_ref %>% 
+  filter(is.na(genome_source)) %>% 
+  group_by(ncbi_info) %>% summarise(n = n()) %>% arrange(desc(n))
+legioInfo_red_sources_ref <- legioInfo_red_sources_ref %>% 
+  mutate(genome_source = ifelse(is.na(genome_source), "Unknown", genome_source))
+legioInfo_red_sources_ref %>% group_by(genome_source) %>% summarise(n = n())
+
+legioInfo_red_sources_ref <- legioInfo_red_sources_ref %>% select(-ncbi_info)
+write_tsv(legioInfo_red_sources_ref, paste0(data_dir,"Metadata/legioInfo_red_sources_refined.tsv"))  
+```
+
+
+```{r}
+legioInfo_red_sources_ref <- read_tsv(paste0(data_dir,"Metadata/legioInfo_red_sources_refined.tsv"))  
+ANI_clustering <- read_tsv(paste0(data_dir,"/secondaryCluster_total.tsv")) %>% rename(legio_id = LegioID)
+
+legioInfo_red_sources_ref_clustered <- ANI_clustering %>% left_join(legioInfo_red_sources_ref) %>% 
+  mutate(strain_cluster = paste0(species_cluster, "_",word(strain_cluster, 2, sep = "_"))) %>% 
+  group_by(strain_cluster) %>% 
+  summarise(sources = paste0(unique(genome_source), collapse = ", "),
+            Clinical = str_detect(paste0(unique(genome_source), collapse = ", "), "Clinical"),
+            Environmental = str_detect(paste0(unique(genome_source), collapse = ", "), "Environmental") & !str_detect(paste0(unique(genome_source), collapse = ", "), "-"),
+            Env_engineered = str_detect(paste0(unique(genome_source), collapse = ", "), "Environmental-engineered"),
+            Env_freshwater = str_detect(paste0(unique(genome_source), collapse = ", "), "Environmental-freshwater"),
+            Env_soil = str_detect(paste0(unique(genome_source), collapse = ", "), "Environmental-soil"),
+            Env_marine = str_detect(paste0(unique(genome_source), collapse = ", "), "Environmental-marine"),
+            Unknown = str_detect(paste0(unique(genome_source), collapse = ", "), "Unknown"))
+write_tsv(legioInfo_red_sources_ref_clustered, paste0(data_dir,"Metadata/legioInfo_sources_all.tsv"))  
+```
+
+```{r}
+
+legioInfo_genus <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+
+legioInfo_genus_source <- legioInfo_genus %>% select(legio_id, strain_cluster) %>% left_join(legioInfo_red_sources_ref_clustered)
+write_tsv(legioInfo_genus_source, paste0(data_dir,"Metadata/legioInfo_sources_legionomePangenome.tsv"))  
+```
+
+
+<!-- ```{r} -->
+<!-- metadata_Alessio %>% filter(!str_detect(accession_assembly, "GC") & accession_sample == "NA") %>% -->
+<!--   pivot_longer(c(ecosystem, ecosystem_category, ecosystem_type, environmental_medium, broad_scale_environmental_context)) %>%  -->
+<!--   ggplot(aes(value)) + -->
+<!--   geom_bar() + -->
+<!--   facet_wrap(~name, scales = "free_y") + -->
+<!--   coord_flip() -->
+
+
+<!-- metadata_Alessio_ok <- metadata_Alessio %>% filter(!str_detect(accession_assembly, "GC") & accession_sample == "NA") %>% mutate(ecosystem = case_when(ecosystem == "marine" ~ "Environmental-marine", -->
+<!--                                           ecosystem == "Human" ~ "Clinical", -->
+<!--                                           str_detect(broad_scale_environmental_context,"Bioreactor|Engineered|rinking") ~ "Environmental-engineered", -->
+<!--                                           str_detect(broad_scale_environmental_context,"marine") ~ "Environmental-marine", -->
+<!--                                           str_detect(broad_scale_environmental_context,"aquifer") ~ "Environmental-freshwater", -->
+<!--                                           str_detect(broad_scale_environmental_context, "Zebrafish|associated") ~ "Host-associated", -->
+<!--                                           str_detect(ecosystem_category, "Human") ~ "Clinical", -->
+<!--                                           str_detect(ecosystem_category, "Environmental") ~ "Environmental", -->
+<!--                                           str_detect(ecosystem_type, "Oligo|bioreactor") ~ "Environmental", -->
+<!--                                           str_detect(ecosystem_type, "Endosphere") ~ "Host-associated", -->
+<!--                                           str_detect(environmental_medium, "water|Engineered|media") ~ "Environmental", -->
+<!--                                           str_detect(environmental_medium, "Plant|Feces") ~ "Host-associated")) -->
+<!-- metadata_Alessio_ok <- metadata_Alessio_ok %>% mutate(country = case_when(str_detect(geographic_origin, ":") ~ word(geographic_origin, 1, sep = ":"), -->
+<!--                                                   geographic_origin == "NA" ~ NA, -->
+<!--                                                   TRUE ~ geographic_origin)) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- metadata_ENA <- metadata_ENA %>% select(sample_accession, broad_scale_environmental_context, country, description, environment_biome, environment_feature, environment_material, environmental_medium, host,  -->
+<!--                         isolate, isolation_source, local_environmental_context, sample_title)  -->
+
+
+<!-- metadata_ENA %>% pivot_longer(-c(sample_accession, sample_title, description)) %>%  -->
+<!--   ggplot(aes(value)) + -->
+<!--   geom_bar() + -->
+<!--   facet_wrap(~name, scales = "free") + -->
+<!--   scale_y_log10() + coord_flip() -->
+
+<!-- metadata_ENA <- metadata_ENA %>% mutate(country = case_when(str_detect(country, ":") ~ word(country, 1, sep = ":"), -->
+<!--                                                   country == "NA" ~ NA, -->
+<!--                                                   TRUE ~ country)) -->
+
+<!-- metadata_ENA <- metadata_ENA %>% mutate(ecosystem = case_when(str_detect(str_to_lower(description), "enviro") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(description), "clinic") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(description), "water") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(description), "lake") ~ "Environmental-freshwater", -->
+<!--                                                               str_detect(str_to_lower(description), "marin") ~ "Environmental-marine", -->
+<!--                                                               str_detect(str_to_lower(description), "sea") ~ "Environmental-marine", -->
+<!--                                                               str_detect(str_to_lower(description), "river") ~ "Environmental-freshwater", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "water") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "reactor") ~ "Environmental-engineered", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "biomaterial containment") ~ "Environmental-engineered", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "building") ~ "Environmental-engineered", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "marine") ~ "Environmental-marine", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "polar desert") ~ "Environmental-soil", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "river") ~ "Environmental-freshwater", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "sponge") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "zebrafish") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(environment_biome), "plant-associated") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(host), "castel") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(host), "amoeb") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(host), "protoz") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(host), "clinic") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(host), "sapiens") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(host), "environ") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "water") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "environ") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "sludge") ~ "Environmental-engineered", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "alveolar") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "bioreactor") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "aspirate") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "biofilm swab") ~ "Environmental", #food : https://www.fda.gov/food/whole-genome-sequencing-wgs-program/genometrakr-network -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "boiler") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "bronch") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "clincal") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "clinical") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "compost") ~ "Environmental-soil", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "cool") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "endosphere") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "endotra") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "hair") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "surface") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "human") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "river") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "lung") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "sponge") ~ "Host-associated", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "soil") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "patient") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "pleur") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "building") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "shower") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "tissue") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "respirat") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "sediment") ~ "Environmental", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "sputum") ~ "Clinical", -->
+<!--                                                               str_detect(str_to_lower(isolation_source), "urine") ~ "Clinical")) -->
+
+<!-- metadata_ENA <- metadata_ENA %>% mutate(country = case_when(country == "United Kingdom" ~ "UK", -->
+<!--                                                             str_detect(description, "Scottish")  ~ "UK", -->
+<!--                                                             TRUE ~ country)) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- backbone <- read_delim(paste0(data_dir,"/Metadata/20230929_Accessions_Metadata.tsv"),  -->
+<!--     delim = "\t", escape_double = FALSE,  -->
+<!--     trim_ws = TRUE) -->
+
+<!-- backbone <- backbone %>% select(legio_id, accession_sample) %>% rename(sample_accession = accession_sample) -->
+<!-- metadata_ENA <- metadata_ENA %>% left_join(backbone) -->
+
+<!-- metadata <- bind_rows(metadata_Alessio_ok %>% select(legio_id, accession_sample, ecosystem, country) %>% rename(sample_accession = accession_sample),  -->
+<!--                       metadata_ENA %>% select(legio_id, sample_accession, ecosystem, country)) %>% distinct(.keep_all = TRUE) -->
+
+
+<!-- #write_tsv(metadata, paste0(data_dir,"/Metadata/LegioId_Metadata.tsv")) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- metadata %>%  -->
+<!--   ggplot(aes(ecosystem, fill = ecosystem)) + -->
+<!--   geom_bar() + -->
+<!--   scale_y_log10() + -->
+<!--   labs(x = "Source", y = "Number of genomes") + -->
+<!--   theme(legend.position = "none") -->
+<!-- #ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/GenomesMetadata_Ecosystems.pdf", dpi = 600) -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- metadata_geo <- metadata %>% group_by(country) %>% summarise(n = n()) -->
+
+<!-- map <- map_data("world") -->
+<!-- map <- map %>% left_join(metadata_geo, by = c("region" = "country")) -->
+<!-- map %>% #filter(is.na(n)) %>%  -->
+<!--   ggplot(aes(long, lat)) + -->
+<!--   geom_polygon(aes(group = group, fill = n)) + -->
+<!--   theme(axis.text.y = element_blank(), axis.title.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), -->
+<!--         axis.text.x = element_blank(), axis.title.x = element_blank(), axis.line.x = element_blank(), axis.ticks.x = element_blank()) + -->
+<!--   scale_fill_met_c("Greek", trans = "log10") + labs(fill = "# genomes") -->
+<!-- #ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/GenomesMetadata_GeographicOrigin.pdf", dpi = 600, width = 14) -->
+
+<!-- map %>% mutate(data = is.na(n)) %>%  -->
+<!--   ggplot(aes(long, lat)) + -->
+<!--   geom_polygon(aes(group = group, fill = data)) + -->
+<!--   theme(axis.text.y = element_blank(), axis.title.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), -->
+<!--         axis.text.x = element_blank(), axis.title.x = element_blank(), axis.line.x = element_blank(), axis.ticks.x = element_blank(), legend.title = ggtext::element_markdown()) + -->
+<!--   scale_fill_met_d("Greek") + labs(fill = "Missing *Legionella*") -->
+<!-- #ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/GenomesMetadata_GeographicOrigin_NAs.pdf", dpi = 600, width = 14) -->
+<!-- ``` -->
+
+
+
+<!-- ```{r} -->
+<!-- metadata %>% left_join(LegioInfo) %>%  -->
+<!--   filter(species_info == "Not named") -->
+
+<!-- ``` -->
+
+
+<!-- #### Part only using Alessio's annotations -->
+<!-- # ```{r} -->
+<!-- # metadata %>% pivot_longer(5:10) %>%  -->
+<!-- #   ggplot(aes(value)) + -->
+<!-- #   geom_bar() + -->
+<!-- #   facet_wrap(~name, scales = "free") +  -->
+<!-- #   scale_y_log10() + coord_flip() -->
+<!-- # # let's try to unify everything in the "ecosystem" merging also "marine" and "environmental" -->
+<!-- # ``` -->
+<!-- #  -->
+<!-- # ```{r} -->
+<!-- # metadata <- metadata %>% mutate(ecosystem = case_when(ecosystem == "marine" ~ "Environmental", -->
+<!-- #                                           ecosystem == "Human" ~ "Clinical", -->
+<!-- #                                           str_detect(broad_scale_environmental_context,"water|Bioreactor|Engineered|marine|aquifer") ~ "Environmental", -->
+<!-- #                                           str_detect(broad_scale_environmental_context, "Zebrafish|associated") ~ "Host-associated", -->
+<!-- #                                           str_detect(ecosystem_category, "Human") ~ "Clinical", -->
+<!-- #                                           str_detect(ecosystem_category, "Environmental") ~ "Environmental", -->
+<!-- #                                           str_detect(ecosystem_type, "Oligo|bioreactor") ~ "Environmental", -->
+<!-- #                                           str_detect(ecosystem_type, "Endosphere") ~ "Host-associated", -->
+<!-- #                                           str_detect(environmental_medium, "water|Engineered|media") ~ "Environmental", -->
+<!-- #                                           str_detect(environmental_medium, "Plant|Feces") ~ "Host-associated")) -->
+<!-- #  -->
+<!-- # metadata %>%  -->
+<!-- #   ggplot(aes(ecosystem, fill = ecosystem)) + -->
+<!-- #   geom_bar() + -->
+<!-- #   scale_y_log10() + -->
+<!-- #   labs(x = "Source", y = "Number of genomes") + -->
+<!-- #   theme(legend.position = "none") -->
+<!-- # ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/GenomesMetadata_Ecosystems.pdf", dpi = 600) -->
+<!-- #  -->
+<!-- # ``` -->
+<!-- #  -->
+<!-- #  -->
+<!-- # ```{r} -->
+<!-- # metadata <- metadata %>% mutate(geographic_origin = case_when(str_detect(geographic_origin, ":") ~ word(geographic_origin, 1, sep = ":"), -->
+<!-- #                                                   geographic_origin == "NA" ~ NA, -->
+<!-- #                                                   TRUE ~ geographic_origin)) -->
+<!-- # metadata_geo <- metadata %>% group_by(geographic_origin) %>% summarise(n = n()) -->
+<!-- #  -->
+<!-- # map <- map_data("world") -->
+<!-- # map <- map %>% left_join(metadata_geo, by = c("region" = "geographic_origin")) -->
+<!-- # ggplot(map, aes(long, lat)) + -->
+<!-- #   geom_polygon(aes(group = group, fill = n)) + -->
+<!-- #   theme(axis.text.y = element_blank(), axis.title.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), -->
+<!-- #         axis.text.x = element_blank(), axis.title.x = element_blank(), axis.line.x = element_blank(), axis.ticks.x = element_blank()) + -->
+<!-- #   scale_fill_met_c("Greek", trans = "log10") + labs(fill = "# genomes") -->
+<!-- # ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/GenomesMetadata_GeographicOrigin.pdf", dpi = 600, width = 14) -->

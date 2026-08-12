@@ -1,0 +1,74 @@
+---
+title: "Legionellaceae - Vitamin B biosynthesis"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+
+KEGGmodules_list <- list.files(paste0(data_dir,"DRAM_noUniRef_all_KEGG_modules"), pattern = "tsv", full.names = TRUE)
+KEGGmodules <- read_tsv(KEGGmodules_list, id = "filename") %>% mutate(legio_id = word(genome, 1, sep = "_"))
+
+```
+```{r}
+
+VitB3_M00115_edits <- function(ko_list){
+  return(str_detect(ko_list,"K00278|K06989") + str_detect(ko_list,"K00767") + str_detect(ko_list,"K03517"))
+}
+
+KEGGmodules_vitB <- KEGGmodules %>% 
+  filter(module %in% c("M00127","M00125","M00115","M00119","M00124","M00123","M00572","M00126"))
+
+KEGGmodules_vitB_edit <- KEGGmodules_vitB %>% 
+  mutate(steps_present_edit = case_when(module == "M00115" ~ VitB3_M00115_edits(kos_present),
+                                        TRUE ~ steps_present)) %>% 
+  mutate(pathway = case_when(module == "M00127" ~ "B1 (Thiamine)",
+                             module == "M00125" ~ "B2 (Riboflavin)",
+                             module == "M00115" ~ "B3 (Nicotinate and nicotinamide)",
+                             module == "M00119" ~ "B5 (Pantotheic acid)",
+                             module == "M00124" ~ "B6 (Pyridoxine)",
+                             module %in% c("M00123","M00572") ~ "B7 (Biotin)",
+                             module == "M00126" ~ "B9 (Folic acid and folate)")) %>% 
+  group_by(legio_id, pathway) %>% 
+  summarise(steps = sum(steps),
+            steps_present = sum(steps_present_edit),
+            steps_coverage = steps_present/steps,
+            kos_present = paste0(kos_present, collapse = ","),
+            genes_present = paste0(genes_present, collapse = ","))
+
+KEGGmodules_vitB_edit_wide <- KEGGmodules_vitB_edit %>% select(legio_id, pathway, steps_coverage) %>% pivot_wider(names_from = pathway, values_from = steps_coverage)
+write_tsv(KEGGmodules_vitB_edit_wide, paste0(data_dir,"DRAM_noUniRef_all_KEGG_modules/Legionome_VitaminBpathways_completeness.tsv"))
+```
+
+```{r}
+
+KEGGmodules_vitB_edit_info <- KEGGmodules_vitB_edit %>% 
+  left_join(metadata)
+
+KEGGmodules_vitB_edit_info %>% 
+  ggplot(aes(as.factor(genus_cluster), steps_coverage, fill = isolated)) +
+  geom_boxplot() +
+  facet_wrap(~pathway)
+
+
+KEGGmodules_vitB_edit_info %>% 
+  ggplot(aes(checkm2.Completeness, steps_coverage)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~pathway)
+
+
+KEGGmodules_vitB_edit_info %>% 
+  group_by(pathway) %>% 
+  rstatix::cor_test(checkm2.Completeness, steps_coverage, method = "spearman")
+
+```

@@ -1,0 +1,308 @@
+---
+title: "Legionome ANI & AAI"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(MetBrewer)
+library(aplot)
+library(ggtree)
+library(ggtreeExtra)
+library(ggnewscale)
+library(fossil)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+# Phylogenetic tree
+legioTree <- treeio::read.newick(paste0(data_dir,"/phylogeneticTrees/msa_softcore_protein_withOutgroup_Concatenator/softcore_0.95_alignment_withOutgroup.fasta.treefile"))
+legioTree$tip.label <- gsub("'","",legioTree$tip.label)
+metadata <- read_tsv(paste0(data_dir,"/LegioID_legionomePangenome.tsv"))
+metadata_genus <- read_tsv(paste0(data_dir,"/LegioID_legionomePangenome_genus.tsv"))
+
+
+# ANI data
+ani <- read_tsv(paste0(data_dir,"legionome_ANI_AAI/ANI/skani_legionome_fullmatrix.tsv"), skip =1, col_names = FALSE)
+colnames(ani) <- c("Ref_file", ani$X1)
+ani <- ani %>% pivot_longer(-Ref_file)%>% 
+  mutate(legioid_ref = word(word(Ref_file, 2, sep = fixed("/")), 1, sep = "_"),
+         legioid_query = word(word(name, 2, sep = fixed("/")), 1, sep = "_"),
+         value = ifelse(value == 0, NA, value))
+
+# AAI data
+aai_files <- list.files(paste0(data_dir,"legionome_ANI_AAI/AAI/"), pattern = ".txt", full.names = TRUE)
+aai <- read_tsv(aai_files)
+aai <- aai %>% mutate(AAI_value = as.numeric(gsub(">|%","",AAI_estimate)),
+                      legioid_ref = word(target, 1, sep = "_"),
+                      legioid_query = word(query, 1, sep = "_"))
+
+```
+
+```{r}
+legioTree_dat <- fortify(legioTree)
+
+phylo_ord <- legioTree_dat %>% filter(isTip) %>% arrange(y) %>% pull(label)
+
+p <- ggtree(legioTree) %<+% metadata
+p <- p  + geom_tiplab(offset = .6, hjust = .5) 
+p
+```
+
+```{r}
+p_ani <- ani %>% ggplot(aes(legioid_ref,legioid_query, fill = value)) + geom_tile()+
+  scale_x_discrete(limits = phylo_ord) + scale_y_discrete(limits = phylo_ord) #+ 
+  theme(aspect.ratio=1, axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) 
+#ggsave(p_ani, width = 25, height = 25, filename = "/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/ANI_legionome.png")
+p_ani %>% insert_left(p, width = 1.)
+
+ani <- ani %>% left_join(legioTree_dat %>% dplyr::rename(pos_ref = y) %>% select(label, pos_ref), by = c("legioid_ref" = "label"))
+ani <- ani %>% left_join(legioTree_dat %>% dplyr::rename(pos_query = y) %>% select(label, pos_query), by = c("legioid_query" = "label"))
+
+ani %>% filter(pos_ref > pos_query)%>% 
+  ggplot(aes(legioid_ref,legioid_query, fill = value)) + geom_tile()+
+  scale_x_discrete(limits = phylo_ord) + scale_y_discrete(limits = phylo_ord) + 
+  scale_fill_viridis_c(option = "cividis", na.value = "white") + 
+  theme(aspect.ratio=1, axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) 
+  
+# 
+# for (i in 1:nrow(ani)){
+#   pos_ref <- legioTree_dat %>% filter(label == ani$legioid_ref[i]) %>% pull(y)
+#   pos_query <- legioTree_dat %>% filter(label == ani$legioid_query[i]) %>% pull(y)
+#   if (pos_ref < pos_query){
+#     temp <- ani$legioid_ref[i]
+#     ani$legioid_ref[i] <- ani$legioid_query[i]
+#     ani$legioid_query[i] <- ani$legioid_ref[i]
+#   }
+# }
+
+
+```
+
+```{r}
+legioid_pneumophila <- metadata %>% filter(str_detect(gtdbtk.classification, "pneumophila")) %>% pull(legio_id)
+aai_vs_Lp <- aai %>% filter(legioid_query %in% legioid_pneumophila) %>% 
+  group_by(legioid_ref) %>% summarise(AAI_vs_Lpneumophila = mean(AAI_value))
+#write_tsv(aai_vs_Lp, "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/legionome_ANI_AAI/AAI_vs_Lpneumophila.tsv")
+```
+
+
+```{r}
+p_aai <- aai %>% ggplot(aes(legioid_ref,legioid_query, fill = AAI_value)) + geom_tile()+
+  scale_x_discrete(limits = phylo_ord) + scale_y_discrete(limits = phylo_ord) + 
+  scale_fill_viridis_c() +
+  theme(aspect.ratio=1, axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) 
+p_aai
+
+
+aai <- aai %>% left_join(legioTree_dat %>% dplyr::rename(pos_ref = y) %>% select(label, pos_ref), by = c("legioid_ref" = "label"))
+aai <- aai %>% left_join(legioTree_dat %>% dplyr::rename(pos_query = y) %>% select(label, pos_query), by = c("legioid_query" = "label"))
+
+
+aai %>% filter(pos_ref < pos_query)%>% 
+  ggplot(aes(legioid_ref,legioid_query, fill = AAI_value)) + geom_tile()+
+  scale_x_discrete(limits = phylo_ord) + scale_y_discrete(limits = phylo_ord) + 
+  scale_fill_viridis_c() +
+  theme(aspect.ratio=1, axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) 
+  
+```
+
+
+```{r}
+
+aai_half <- aai %>% filter(pos_ref > pos_query)
+ani_half <- ani %>% filter(pos_ref < pos_query)
+ggplot() +
+  geom_tile(aes(legioid_ref, legioid_query, fill = value), data = ani_half) +
+  scale_fill_viridis_c("ANI", breaks = c(85,90,95,99.5), na.value = "white") +
+  new_scale_fill() +
+  geom_tile(aes(legioid_ref,legioid_query, fill = AAI_value), data = aai_half) +
+  scale_fill_viridis_c("AAI", option = "cividis") +
+  labs(x = "Genomes", y = "Genomes") +
+  #geom_tile(aes(x = "Legio04212", y = "Legio04212"), size = 0.5) + # In case some genomes are to be highlighted
+  scale_x_discrete(limits = phylo_ord) + scale_y_discrete(limits = phylo_ord) +
+  theme(axis.text = element_blank(),
+        aspect.ratio=1)
+
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/ANI_vs_AAI_legionome.pdf", dpi = 600, width = 10)
+```
+
+```{r}
+aai_filtr <- aai %>% select(legioid_ref,legioid_query,AAI_value)
+
+aai_filtr %>% left_join(metadata %>% mutate(gtdbtk_genus_ref = word(gtdbtk.classification, 6, sep = ";")) %>% select(legio_id, gtdbtk_genus_ref), by = c("legioid_ref" = "legio_id")) %>% 
+  left_join(metadata %>% mutate(gtdbtk_genus_query = word(gtdbtk.classification, 6, sep = ";")) %>% select(legio_id, gtdbtk_genus_query), by = c("legioid_query" = "legio_id")) %>% 
+  ggplot(aes(AAI_value, fill = gtdbtk_genus_ref == gtdbtk_genus_query)) + geom_density(alpha = 0.3)
+
+aai_mat <- aai_filtr %>% 
+  spread(legioid_query, AAI_value, fill=0) %>% 
+  column_to_rownames(var="legioid_ref") %>% 
+  as.matrix
+aai_dist <- as.dist(100-aai_mat)
+
+aai_clust <- hclust(aai_dist, method = "average")
+plot(aai_clust)
+
+```
+
+```{r}
+aai_thresh <- seq(from = 30,to = 50, by = 1)
+genus_gtdb_aai_concordance <- c()
+genus_number_aai <- c()
+
+for (i in aai_thresh){
+  genus_cluster <- cutree(aai_clust, h = i)
+
+  genus_tbl <- tibble(legio_id = names(genus_cluster), genus_cluster = genus_cluster)
+  metadata_tmp <- metadata %>% left_join(genus_tbl) %>% mutate(gtdb_genus = word(gtdbtk.classification, 6, sep = ";"))
+  
+  genus_concordance_tmp <-  adj.rand.index(as.numeric(metadata_tmp$genus_cluster),as.numeric(as.factor(metadata_tmp$gtdb_genus)))
+  genus_gtdb_aai_concordance <- c(genus_gtdb_aai_concordance, genus_concordance_tmp)
+  genus_number_aai <- c(genus_number_aai, max(genus_cluster))
+}
+
+plot(100-aai_thresh, genus_gtdb_aai_concordance)
+plot(100-aai_thresh, genus_number_aai)
+```
+
+```{r}
+library(ggsankey)
+genus_cluster_bestConcordance <- cutree(aai_clust, h = (100-59))
+max(genus_cluster_bestConcordance) # number of estimated genera
+genus_cluster_literature <- cutree(aai_clust, h = (100-65))
+genus_tbl <- tibble(legio_id = names(genus_cluster), genus_cluster_bestConcordance = as.numeric(genus_cluster_bestConcordance), genus_cluster_literature = as.numeric(genus_cluster_literature))
+metadata_genus <- metadata %>% left_join(genus_tbl) %>% mutate(gtdb_genus = word(gtdbtk.classification, 6, sep = ";"))
+#write_tsv(metadata_genus, paste0(data_dir,"/LegioID_legionomePangenome_genus.tsv"))
+df <- metadata_genus %>% 
+  make_long(genus_cluster_literature, genus_cluster_bestConcordance, gtdb_genus)
+
+ggplot(df, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node))) +
+  geom_sankey() +
+  theme_sankey(base_size = 16)
+# 65% AAI splits very much in half the main g__Legionella compared to a 59% threshold. Will use 59% to compare to GTDB
+#metadata_genus <- metadata_genus %>% select(genus_cluster_literature) %>% rename(genus_cluster = genus_cluster_bestConcordance)
+```
+
+```{r}
+p <- ggtree(legioTree) %<+% metadata_genus
+p_aai <- p + 
+  geom_label(aes(x=branch, label=genus_cluster_bestConcordance, fill=as.factor(genus_cluster_bestConcordance)))
+p_aai
+
+p_aai_lit <- p + 
+  geom_label(aes(x=branch, label=genus_cluster_literature, fill=as.factor(genus_cluster_literature)))
+p_aai_lit
+
+p_gtdb <- p + 
+  geom_label(aes(x=branch, label=gtdb_genus, fill=as.factor(gtdb_genus)))
+p_gtdb
+
+# GTDBTk tree and inferred genera are mostly concordant except for some deeply branching genomes.
+# Possibly this is due to the fact that there has been some extensive mutations
+
+```
+
+
+```{r}
+
+metadata_genus_summary_info <- metadata_genus %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep ="_")) %>% 
+  group_by(species_cluster) %>% sample_n(1) %>% # Get only one genome per species to not count different strains
+  group_by(species_info) %>% mutate(n_species_in_type = n()) %>% 
+  group_by(genus_cluster_bestConcordance) %>% mutate(n_species_in_genus = n()) %>% 
+  group_by(species_info, genus_cluster_bestConcordance) %>% 
+  summarise(gtdb_genus = paste(unique(gtdb_genus), collapse = ";"), n_species_with_type_in_genus = n(), n_species_in_type = unique(n_species_in_type), n_species_in_genus = unique(n_species_in_genus), 
+            frac_type_in_genus = n_species_with_type_in_genus/n_species_in_type, # Fraction of species with a given type in a genus over the total number of species of that type
+            frac_in_genus = n_species_with_type_in_genus/n_species_in_genus) # Fraction of species with a given type in a genus over the total number of species in that genus
+
+metadata_genus_summary_info2 <- metadata_genus_summary_info %>% select(species_info, genus_cluster_bestConcordance, n_species_with_type_in_genus) %>% 
+  ungroup() %>% group_by(genus_cluster_bestConcordance) %>% mutate(n_species_per_genus = sum(n_species_with_type_in_genus),
+                                     frac_type_in_genus = n_species_with_type_in_genus/n_species_per_genus)  #%>% 
+ # select(-starts_with("n")) %>% pivot_wider(names_from = species_info, values_from = frac_type_in_genus) %>% replace(is.na(.),0)
+```
+
+```{r}
+
+metadata_genus_summary_isolation <- metadata_genus %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep ="_")) %>% 
+  group_by(species_cluster) %>% sample_n(1) %>% # Get only one genome per species to not count different strains
+  group_by(genus_cluster_bestConcordance) %>% mutate(n_species_in_genus = n()) %>% 
+  group_by(genus_cluster_bestConcordance, isolated) %>% 
+  summarise( n = n()) %>% #gtdb_genus = paste(unique(gtdb_genus), collapse = ";"),
+  pivot_wider(values_from = n, names_from = isolated) %>% 
+  rename(non_isolated = `FALSE`, isolated= `TRUE`) %>% 
+  replace_na(list(isolated = 0, non_isolated = 0)) %>% 
+  mutate(total_species = non_isolated + isolated,
+         percentage_isolated = isolated/total_species)
+  
+
+metadata_genus_summary_isolation
+```
+
+```{r}
+metadata_genus_summary_isolation %>% pivot_longer(c(isolated, non_isolated)) %>% 
+  ggplot() +
+  geom_col(aes(genus_cluster_bestConcordance, value, fill = name))
+
+metadata_genus_summary_info2 %>% ggplot() +
+  geom_col(aes(genus_cluster_bestConcordance, n_species_with_type_in_genus, fill = species_info))
+
+metadata_genus %>% mutate(info = interaction(species_info,isolated)) %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep ="_")) %>% 
+  group_by(species_cluster) %>% sample_n(1) %>% # Get only one genome per species to not count different strains
+  group_by(genus_cluster_bestConcordance, info) %>% 
+  summarise(n_species = n()) %>% 
+  mutate(info = case_when(info == "Not named.FALSE" ~ "Not named & non isolated",
+                          info == "Not named.TRUE" ~ "Not named & isolated",
+                          info == "Known.TRUE" ~ "Named",
+                          info == "Confirmed pathogenic.TRUE" ~ "Confirmed pathogenic",
+                          info == "Most clinically relevant.TRUE" ~ "Most clinically relevant"),
+         info = factor(info, levels = c("Most clinically relevant", "Confirmed pathogenic", "Named",  "Not named & isolated","Not named & non isolated"))) %>% 
+  ggplot(aes(reorder(genus_cluster_bestConcordance, -n_species, sum), n_species, fill = info)) +
+  geom_col() + 
+  scale_fill_manual("Species", values = c("maroon","orange","yellow","lightgreen","lightblue3")) + 
+  scale_y_continuous("Number of species [-]") +
+  xlab("Genus-level clusters") +
+  theme(axis.text.x = element_blank())
+
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/SpeciesInfo_genusCluster.pdf", dpi = 600, width = 10)
+
+```
+
+```{r}
+aai %>% 
+  left_join(metadata_genus %>% select(legio_id, genus_cluster) %>% rename(legioid_ref = legio_id, genus_cluster_ref = genus_cluster)) %>% 
+  left_join(metadata_genus %>% select(legio_id, genus_cluster) %>% rename(legioid_query = legio_id, genus_cluster_query = genus_cluster)) %>% 
+  mutate(same_genus = genus_cluster_ref == genus_cluster_query) %>% 
+  ggplot(aes(AAI_value, fill = same_genus)) +
+  geom_histogram()
+
+```
+
+```{r}
+# Species very close to L. pneumophila, but classified differently
+
+targets_Legio00475 <- c("Legio00475", "Legio04974", "Legio03814", "Legio03961", "Legio04348")
+ani %>% filter(legioid_ref %in% targets_Legio00475 & legioid_query %in% targets_Legio00475) %>% 
+  filter(legioid_ref != legioid_query) %>% 
+  filter(legioid_ref == "Legio00475" | legioid_query == "Legio00475") %>% 
+  pull(value) %>% mean()
+
+targets_Legio04336 <- c("Legio04336", "Legio04974", "Legio03814", "Legio03961", "Legio04348")
+ani %>% filter(legioid_ref %in% targets_Legio04336 & legioid_query %in% targets_Legio04336) %>% 
+  filter(legioid_ref != legioid_query) %>% 
+  filter(legioid_ref == "Legio04336" | legioid_query == "Legio04336") %>% 
+  pull(value) %>% mean()
+
+targets_Legio01436 <- c("Legio01436", "Legio04974", "Legio03814", "Legio03961", "Legio04348")
+ani %>% filter(legioid_ref %in% targets_Legio01436 & legioid_query %in% targets_Legio01436) %>% 
+  filter(legioid_ref != legioid_query) %>% 
+  filter(legioid_ref == "Legio01436" | legioid_query == "Legio01436") %>% 
+  pull(value) %>% mean()
+```

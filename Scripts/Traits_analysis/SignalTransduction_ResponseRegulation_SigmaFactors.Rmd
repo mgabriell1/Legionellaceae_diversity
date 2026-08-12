@@ -1,0 +1,423 @@
+---
+title: "Signal trasduction and response regulation proteins based on eggNOG and ppanggolin"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(rBLAST)
+library(Biostrings)
+library(igraph)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv")) 
+
+Mist4_db_families <- read_csv(paste0(data_dir, "SignalTrasduction_ResponseRegulation/Mist4.0_protein_families.csv"))
+
+gene_families <- read_tsv(paste0(data_dir, "ppanggolin_results/Legionome_allGenomes_percID30_qCov65/gene_families.tsv"), col_names = FALSE)
+colnames(gene_families) <- c("gene_family", "protein_id", "fragmented")
+
+eggnog_annotation_files <- list.files(paste0(data_dir, "eggNOG_annotations/"), pattern = "annotations$", recursive = TRUE, full.names = TRUE)
+eggnog_annotation <- read_tsv(eggnog_annotation_files, id = "filename", comment = "##")
+eggnog_annotation <- eggnog_annotation %>% mutate(legio_id = gsub("_eggNOG", "", word(filename, 10, sep = ("/")))) %>% select(-filename) %>% relocate(legio_id)
+
+legionomeProt <- readAAStringSet(paste0(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"))
+
+```
+
+
+```{r}
+
+eggnog_annotation <- eggnog_annotation %>% left_join(gene_families, by = c(`#query` = "protein_id"))
+
+```
+
+
+## Input
+```{r}
+Mist4_db_families_input_list <- Mist4_db_families %>% filter(Kind == "input" & `Signal transduction specific?`) %>% pull(`Domain name`) #
+
+eggnog_annotation_input <- eggnog_annotation %>% filter(str_detect(PFAMs, paste0(Mist4_db_families_input_list, collapse = "|")))
+
+eggnog_annotation_input_summ <- eggnog_annotation_input %>% group_by(legio_id) %>% 
+  summarise(n_input = n(),
+            n_input_families = length(unique(gene_family))) %>% right_join(metadata) %>% 
+  mutate(n_input = ifelse(is.na(n_input), 0, n_input),
+         n_input_families = ifelse(is.na(n_input_families), 0, n_input_families)) #to include L. polyplacis which has no input
+  
+eggnog_annotation_input_summ %>% 
+  ggplot(aes(as.factor(genus_cluster), n_input, fill = isolated)) +
+  geom_boxplot() 
+eggnog_annotation_input_summ %>% 
+  ggplot(aes(as.factor(genus_cluster), n_input_families, fill = isolated)) +
+  geom_boxplot() 
+
+eggnog_annotation_input_summ %>% 
+  filter(genus_cluster %in% c(1, 6, 13)) %>% 
+  group_by(genus_cluster) %>% 
+  rstatix::t_test(n_input ~ isolated)
+# There is a significant change in the number of input signal transduction proteins found between isolated genomes and MAGs, especially in one genus cluster
+
+eggnog_annotation_input_summ %>% 
+  filter(isolated) %>% 
+  rstatix::anova_test(n_input ~ genus_cluster)
+eggnog_annotation_input_summ %>% 
+  filter(isolated) %>% 
+  rstatix::tukey_hsd(n_input ~ as.factor(genus_cluster))
+# different genera, different amount of input signal transduction proteins
+
+eggnog_annotation_input_summ %>% 
+  filter(isolated) %>% 
+  group_by(genus_cluster) %>% 
+  summarise(median = median(n_input))
+
+eggnog_annotation_input_summ %>% 
+  ggplot(aes(checkm2.Genome_Size/(checkm2.Completeness)*100, n_input)) +
+  geom_point()
+```
+
+
+```{r} 
+## Comments in [brackets] refer to non signal transduction specific proteins (all proteins in Mist)
+length(unique(eggnog_annotation_input$gene_family))
+# 255 protein clusters
+# [[726 protein clusters]] #old clustering
+# [2692 protein clusters]
+
+eggnog_annotation_input_metadata <- eggnog_annotation_input %>% left_join(metadata) %>% 
+  mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_"))
+
+prots_input_clust_membership_info_summ <- eggnog_annotation_input_metadata %>% group_by(gene_family) %>% 
+  summarise(n_proteins = n(), n_genomes = length(unique(legio_id)), n_species = length(unique(species_cluster)),
+            n_genera = length(unique(genus_cluster)), genera_list = paste0(unique(genus_cluster), collapse = ","))
+
+common_input_protClusters <- prots_input_clust_membership_info_summ %>% filter(n_species > 0.95*length(unique(eggnog_annotation_input_metadata$species_cluster))) 
+nrow(common_input_protClusters)
+
+common_input_protClusters_eggnog <- eggnog_annotation_input_metadata %>% filter(`#query` %in% common_input_protClusters$gene_family) %>% mutate(type = "Signal transduction")
+# Only 3 gene families are present in more than 95% of the species (0.28%): 
+# JDBCAP_00610: PEP-utilising enzyme, N-terminal, ptsP
+# KHHBNJ_01340: His Kinase A (phosphoacceptor) domain, qseC
+# BNOMEI_06100: Universal stress protein, uspA
+#[Only 49 gene families are present in more than 95% of the species (1.82%)]
+ 
+common_eggnog_annotation_input_metadata <- eggnog_annotation_input_metadata %>% filter(gene_family %in% common_input_protClusters$gene_family)
+# TDB: look and see relevant things
+
+single_genus_prot_input_clusters <- prots_input_clust_membership_info_summ %>% filter(n_genera == 1) %>% 
+  left_join(metadata %>% group_by(genus_cluster) %>% dplyr::rename(genera_list = genus_cluster) %>% summarise(n_genomes_genus = n()) %>% mutate(genera_list = as.character(genera_list))) %>% 
+  mutate(perc_genomes_genus = n_genomes/n_genomes_genus)
+nrow(single_genus_prot_input_clusters) 
+# 124 protein clusters are present in only a single genus out of 255 total clusters (48%) 
+# [[531 protein clusters are present in only a single genus out of 726 total clusters (71.8%) ]] Old clustering
+# [1859 protein clusters are present in only a single genus out of 2692 total clusters (69%)]
+
+prots_input_clust_membership_info_summ %>% filter(n_species == 1) %>% nrow()
+# 86 proteins are present in only one species (33.7%)
+# [[373 proteins are present in only one species (51.4%)]] old clustering
+
+single_genus_prot_input_clusters_non_singleton <- single_genus_prot_input_clusters %>% filter(!(n_genomes == 1 & n_genomes_genus > 1)) # Remove the prot clusters which only involve one genome in genera where there are multiple genomes
+nrow(single_genus_prot_input_clusters_non_singleton) 
+# 50/124 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)
+# [[219/531 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)]] old clustering
+# [794/1859 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)]
+
+single_genus_prot_input_clusters_non_singleton_species <- single_genus_prot_input_clusters %>% filter(!(n_species == 1 & n_genomes_genus > 1))
+nrow(single_genus_prot_input_clusters_non_singleton_species) 
+# 189/531 protein clusters which occur within a single genus are present in multiple species (except for 1 genomes genera)
+# 31 prots are present in single genome genera and 158 in larger genera
+# [662/1859 protein clusters which occur within a single genus are present in multiple species (except for 1 genomes genera)]
+
+single_genus_prot_input_clusters %>% filter(!(n_species == 1))
+nrow(single_genus_prot_input_clusters_non_singleton_species) 
+
+legionomeProt_input_representatives <- legionomeProt[word(word(names(legionomeProt), start = 2, end = 3, sep = "_"), 1) %in% prots_input_clust_membership_info_summ$gene_family]
+#writeXStringSet(legionomeProt_input_representatives, paste0(data_dir, "SignalTrasduction_ResponseRegulation/legionomeProt_input_representatives.fasta"))
+
+```
+
+```{r}
+input_representatives_vs_nr_raw <- read_tsv(paste0(data_dir, "/SignalTrasduction_ResponseRegulation/legionomeProt_input_representatives_vs_NR_tax.m8"))
+legionomeProt_input_representatives <- readAAStringSet(paste0(data_dir, "SignalTrasduction_ResponseRegulation/legionomeProt_input_representatives.fasta"))
+legionomeProt_input_representatives_tbl <- tibble(prot_representative = names(legionomeProt_input_representatives))
+legionomeProt_input_representatives_tbl <- legionomeProt_input_representatives_tbl %>% 
+  mutate(description = substr(prot_representative, 24, 500),
+         prot_representative = word(prot_representative, 1),
+         gene_family = word(prot_representative, start = 2, end = 3, sep = "_")) %>% 
+  mutate(SigTras_specific = gene_family %in% eggnog_annotation_input$`#query`)
+
+input_representatives_vs_nr_noLegio <- input_representatives_vs_nr_raw %>% 
+  filter(!str_detect(taxlineage, "f_Legionellaceae")) %>% # To keep only not Legionellaceae
+  filter(!str_detect(taxlineage, "unclassified")) # To remove taxa which might be Legionellaceae
+
+input_representatives_vs_nr_noLegio_filtr <- input_representatives_vs_nr_noLegio %>% filter(qcov >= 0.65 & bits > 50 & pident > 30)
+input_representatives_vs_nr_noLegio_filtr_protnames <- input_representatives_vs_nr_noLegio_filtr %>% distinct(query) %>% pull(query)
+
+legionomeProt_input_representatives_tbl <- legionomeProt_input_representatives_tbl %>% 
+  mutate(detected_NR = ifelse(prot_representative %in% input_representatives_vs_nr_noLegio_filtr_protnames, TRUE, FALSE),
+         hyp_prot = ifelse(str_detect(str_to_lower(description), "hypothetical protein"), TRUE, FALSE))
+
+legionomeProt_input_representatives_tbl %>% filter(SigTras_specific) %>% 
+  group_by(detected_NR, hyp_prot) %>% summarise(n = n())
+# 24% of proteins are unique to Legionellaceae
+# hypothetical proteins are more common when Legionella-specific (29.5%) then in common ones (25.9%)
+# [21% of proteins are unique to Legionellaceae]
+# [hypothetical proteins are more common when Legionella-specific (30.6%) then in common ones (24.3%)]
+
+legionomeProt_input_representatives_tbl_presences <- legionomeProt_input_representatives_tbl %>%  left_join(prots_input_clust_membership_info_summ)
+
+legionomeProt_input_representatives_tbl_presences %>% filter(!detected_NR) %>% 
+  filter(SigTras_specific) %>% 
+  filter(n_species > 0.5*128)
+# No signal transduction specific proteins are widely distributed in Legionella but are absent elsewhere
+# [Two gene families are present in more than 50% of species but not in other clades in NR]
+# [Legio03726_DEJIDD_02430 - peptidoglycan DD-metalloendopeptidase family protein - present in 101 species in 10 genera]
+# [Legio04824_PMMKAD_03625 - methyltransferase - present in 110 species in 9 genera]
+# [It seems that those annotations are not specifically linked to signal transduction so better to not highlight these proteins]
+```
+
+
+## Output
+```{r}
+Mist4_db_families_output_list <- Mist4_db_families %>% filter(Kind == "output" & `Signal transduction specific?`) %>% pull(`Domain name`) #
+
+eggnog_annotation_output <- eggnog_annotation %>% filter(str_detect(PFAMs, paste0(Mist4_db_families_output_list, collapse = "|")))
+
+eggnog_annotation_output_summ <- eggnog_annotation_output %>% group_by(legio_id) %>% 
+  summarise(n_output = n(), 
+            n_output_families = length(unique(gene_family))) %>% right_join(metadata)
+
+eggnog_annotation_output_summ %>% 
+  ggplot(aes(as.factor(genus_cluster), n_output, fill = isolated)) +
+  geom_boxplot() 
+eggnog_annotation_output_summ %>% 
+  ggplot(aes(as.factor(genus_cluster), n_output_families, fill = isolated)) +
+  geom_boxplot()
+
+eggnog_annotation_output_summ %>% 
+  filter(genus_cluster %in% c(1, 6, 13)) %>% 
+  group_by(genus_cluster) %>% 
+  rstatix::t_test(n_output ~ isolated)
+# There is a significant change in the number of output signal translaction proteins found between isolated genomes and MAGs only in two genus cluster
+
+eggnog_annotation_output_summ %>% 
+  filter(isolated) %>% 
+  rstatix::anova_test(n_output ~ as.factor(genus_cluster))
+eggnog_annotation_output_summ %>% 
+  filter(isolated) %>% 
+  rstatix::tukey_hsd(n_output ~ as.factor(genus_cluster))
+# different genera, different amount of output signal transduction proteins
+
+eggnog_annotation_output_summ %>% 
+  filter(isolated) %>% 
+  group_by(genus_cluster) %>% 
+  summarise(median = median(n_output))
+```
+
+
+```{r}
+## Comments in [brackets] refer to non signal transduction specific proteins (all proteins in Mist)
+length(unique(eggnog_annotation_output$gene_family))
+# 561 protein clusters
+# [[1363 protein clusters]] #old clustering
+# [1447 protein clusters]
+
+eggnog_annotation_output_metadata <- eggnog_annotation_output %>% left_join(metadata) %>% 
+  mutate(species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_"))
+
+prots_output_clust_membership_info_summ <- eggnog_annotation_output_metadata %>% group_by(gene_family) %>% 
+  summarise(n_proteins = n(), n_genomes = length(unique(legio_id)), n_species = length(unique(species_cluster)),
+            n_genera = length(unique(genus_cluster)), genera_list = paste0(unique(genus_cluster), collapse = ","))
+
+common_output_protClusters <- prots_output_clust_membership_info_summ %>% filter(n_species > 0.95*length(unique(eggnog_annotation_output_metadata$species_cluster))) 
+nrow(common_output_protClusters)
+common_output_protClusters_eggnog <- eggnog_annotation_output_metadata %>% filter(`#query` %in% common_output_protClusters$gene_family) %>% 
+  bind_rows(eggnog_annotation_output_metadata %>% filter(gene_family == "PCGKGH_13610") %>% slice_head(n=1)) %>% # since the cluster representative has not been annotated by eggNOG
+  mutate(type = "Response regulator")
+# Only 12 gene families are present in more than 95% of the species (0.95%)
+# [Only 19 gene families are present in more than 95% of the species (1.31%)]
+common_eggnog_annotation_output_metadata <- eggnog_annotation_output_metadata %>% filter(gene_family %in% common_output_protClusters$gene_family)
+# TDB: look and see relevant things
+
+prots_output_clust_membership_info_summ %>% filter(n_species == 1) %>% nrow()
+# 183 proteins are present in only one species (32.6%)
+# [[663 proteins are present in only one species (48.6%)]] old clustering
+
+single_genus_prot_output_clusters <- prots_output_clust_membership_info_summ %>% filter(n_genera == 1) %>% 
+  left_join(metadata %>% group_by(genus_cluster) %>% dplyr::rename(genera_list = genus_cluster) %>% summarise(n_genomes_genus = n()) %>% mutate(genera_list = as.character(genera_list))) %>% 
+  mutate(perc_genomes_genus = n_genomes/n_genomes_genus)
+nrow(single_genus_prot_output_clusters) 
+# 238 protein clusters are present in only a single genus out of 561 total clusters (42.4%)
+# [[925 protein clusters are present in only a single genus out of 1383 total clusters (66.9%)]] old clustering
+# [977 protein clusters are present in only a single genus out of 1447 total clusters (67.3%)]
+
+single_genus_prot_output_clusters_non_singleton <- single_genus_prot_output_clusters %>% filter(!(n_genomes == 1 & n_genomes_genus > 1)) # Remove the prot clusters which only involve one genome in genera where there are multiple genomes
+nrow(single_genus_prot_output_clusters_non_singleton) 
+# 65/238 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)
+# [[375/925 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)]] old clustering
+# [386/977 protein clusters which occur within a single genus are present in multiple genomes (except for 1 genomes genera)]
+
+single_genus_prot_output_clusters_non_singleton_species <- single_genus_prot_output_clusters %>% filter(!(n_species == 1 & n_genomes_genus > 1))
+nrow(single_genus_prot_output_clusters_non_singleton_species) 
+# 58/238  protein clusters which occur within a single genus are present in multiple species (except for 1 genomes genera)
+# [[309/925  protein clusters which occur within a single genus are present in multiple species (except for 1 genomes genera)]] old clustering
+# [[47 proteins in single genome genera, while 262 in larger genera]] old clustering
+# [318/977  protein clusters which occur within a single genus are present in multiple species (except for 1 genomes genera)]
+
+
+legionomeProt_output_representatives <- legionomeProt[word(word(names(legionomeProt), start = 2, end = 3, sep = "_"), 1) %in% prots_output_clust_membership_info_summ$gene_family]
+#writeXStringSet(legionomeProt_output_representatives, paste0(data_dir, "SignalTrasduction_ResponseRegulation/legionomeProt_output_representatives.fasta"))
+
+unique_gene_families_per_species <- eggnog_annotation_output_metadata %>% group_by(gene_family) %>% 
+  mutate(n_genomes = length(unique(legio_id)), n_species = length(unique(species_cluster))) %>% 
+  filter(n_species == 1) %>% 
+  group_by(legio_id) %>% 
+  summarise(n_genes_species = n())
+unique_gene_families_per_genomovar <- eggnog_annotation_output_metadata %>% group_by(gene_family) %>% 
+  mutate(n_genomes = length(unique(legio_id)), n_species = length(unique(species_cluster))) %>% 
+  filter(n_genomes == 1) %>% 
+  group_by(legio_id) %>% 
+  summarise(n_genes_genomovar = n())
+
+unique_gene_families_per_species %>% left_join(unique_gene_families_per_genomovar) 
+
+```
+
+```{r}
+output_representatives_vs_nr_raw <- read_tsv(paste0(data_dir, "/SignalTrasduction_ResponseRegulation/legionomeProt_output_representatives_vs_NR_tax.m8"))
+legionomeProt_output_representatives <- readAAStringSet(paste0(data_dir, "SignalTrasduction_ResponseRegulation/legionomeProt_output_representatives.fasta"))
+legionomeProt_output_representatives_tbl <- tibble(prot_representative = names(legionomeProt_output_representatives))
+legionomeProt_output_representatives_tbl <- legionomeProt_output_representatives_tbl %>% 
+  mutate(description = substr(prot_representative, 24, 500),
+         prot_representative = word(prot_representative, 1),
+         gene_family = word(prot_representative, start = 2, end = 3, sep = "_")) %>% 
+  mutate(SigTras_specific = gene_family %in% eggnog_annotation_output$`#query`)
+
+output_representatives_vs_nr_noLegio <- output_representatives_vs_nr_raw %>% 
+  filter(!str_detect(taxlineage, "f_Legionellaceae")) %>% # To keep only not Legionellaceae
+  filter(!str_detect(taxlineage, "unclassified")) # To remove taxa which might be Legionellaceae
+
+output_representatives_vs_nr_noLegio_filtr <- output_representatives_vs_nr_noLegio %>% filter(qcov >= 0.65 & bits > 50 & pident > 30)
+output_representatives_vs_nr_noLegio_filtr_protnames <- output_representatives_vs_nr_noLegio_filtr %>% distinct(query) %>% pull(query)
+
+legionomeProt_output_representatives_tbl <- legionomeProt_output_representatives_tbl %>% 
+  mutate(detected_NR = ifelse(prot_representative %in% output_representatives_vs_nr_noLegio_filtr_protnames, TRUE, FALSE),
+         hyp_prot = ifelse(str_detect(str_to_lower(description), "hypothetical protein"), TRUE, FALSE))
+
+legionomeProt_output_representatives_tbl %>% filter(SigTras_specific) %>% 
+  group_by(detected_NR, hyp_prot) %>% summarise(n = n())
+# 27.3% of proteins are unique to Legionellaceae
+# hypothetical proteins are more common when Legionella-specific (40.4%) then in common ones (20.8%)
+# [36.4% of proteins are unique to Legionellaceae]
+# [hypothetical proteins are more common when Legionella-specific (29.3%) then in common ones (19.7%)]
+
+legionomeProt_output_representatives_tbl_presences <- legionomeProt_output_representatives_tbl %>% left_join(prots_output_clust_membership_info_summ)
+
+legionomeProt_output_representatives_tbl_presences %>% filter(!detected_NR) %>% filter(SigTras_specific) %>% 
+  filter(n_species > 0.5*128)
+# Two gene families are present in more than 50% of species but not in other clades in NR
+# Legio03587_FBFNGC_01590 - Putative transcriptional regulator - present in 104 species in 13 genera -> predicted using colabfold and searched using foldseek
+
+```
+
+```{r}
+
+common_input_output_eggnog <- common_input_protClusters_eggnog %>% bind_rows(common_output_protClusters_eggnog) %>% 
+  select(type, gene_family, Preferred_name, COG_category, Description, KEGG_ko, KEGG_Pathway, PFAMs)
+write_tsv(common_input_output_eggnog, paste0(data_dir, "/SignalTrasduction_ResponseRegulation/common_input_output_eggnog.tsv"))
+```
+
+```{r}
+eggnog_annotation_input_summ_red <- eggnog_annotation_input_summ %>% 
+  select(legio_id, genus_cluster, n_input, isolated)
+eggnog_annotation_output_summ_red <- eggnog_annotation_output_summ %>% 
+  select(legio_id, genus_cluster, n_output, isolated)
+
+eggnog_annotation_summ_red <- eggnog_annotation_input_summ_red %>% left_join(eggnog_annotation_output_summ_red)
+eggnog_annotation_summ_isol_red <- eggnog_annotation_summ_red %>% filter(isolated)
+
+eggnog_annotation_summ_isol_red  %>% 
+  pivot_longer(c(n_input, n_output)) %>% 
+  mutate(name = ifelse(name == "n_input", "Signal transduction", "Response regulation"),
+         name = factor(name, levels = c("Signal transduction", "Response regulation"))) %>% 
+  ggplot(aes(as.factor(genus_cluster), value, fill = as.factor(genus_cluster))) +
+  geom_boxplot(outlier.size = 0.1) +
+  facet_wrap(~name) +
+  scale_fill_manual(values = c("#ff0029","#377eb8","#ff7f00","#fb8072","#80b1d3")) +
+  labs(y = "Genes per genome [-]", x = "Genus", fill = "Isolated \ngenome") +
+  theme(legend.position = "none") #+ geom_signif(comparisons = list(c("1", "6"),c("1", "13"))) #To be done 
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/SignalTransduction_ResponseRegulation/Genes_perGenome_vs_genera_SignalTransdSpecific.pdf", dpi = 600, height = 5)
+
+eggnog_annotation_summ_red  %>% 
+  pivot_longer(c(n_input, n_output)) %>% 
+  mutate(name = ifelse(name == "n_input", "Signal transduction", "Response regulation"),
+         name = factor(name, levels = c("Signal transduction", "Response regulation"))) %>% 
+  ggplot(aes(as.factor(genus_cluster), value, fill = as.factor(isolated))) +
+  geom_boxplot(outlier.size = 0.1, position = position_dodge2(preserve = "single")) +
+  ylim(c(NA, 200)) +
+  facet_rep_grid(.~name) +
+  MetBrewer::scale_fill_met_d("Hiroshige") +
+  labs(y = "Genes per genome [-]", x = "Genus", fill = "Isolated \ngenome") #+
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/SignalTransduction_ResponseRegulation/Genes_perGenome_vs_genera_SignalTransdSpecific_all_v2.pdf", dpi = 600, height = 5, width = 10)  
+
+
+prots_input_clust_membership_info_summ %>% mutate(type = "Signal transduction") %>% 
+  bind_rows(prots_output_clust_membership_info_summ %>% mutate(type = "Response regulation")) %>% 
+  mutate(type = factor(type, levels = c("Signal transduction", "Response regulation"))) %>% 
+  ggplot(aes(n_species)) +
+  geom_histogram() +
+  #scale_y_sqrt() +
+  facet_wrap(~type) +
+  labs(x = "# of species [-]", y = "# of gene families [-]")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/SignalTransduction_ResponseRegulation/GeneFamilies_Uplots_SignalTransdSpecific.pdf", dpi = 600, height = 5)
+
+# eggnog_annotation_input_uniq <- eggnog_annotation_input %>% select(legio_id, `#query`, gene_family) %>%
+#   left_join(prots_input_clust_membership_info_summ) %>% group_by(legio_id) %>%
+#   summarise(n_inputs = n(), unique_inputs = sum(n_species == 1))
+# eggnog_annotation_output_uniq <- eggnog_annotation_output %>% select(legio_id, `#query`, gene_family) %>%
+#   left_join(prots_output_clust_membership_info_summ) %>% group_by(legio_id) %>%
+#   summarise(n_outputs = n(), unique_outputs = sum(n_species == 1))
+# 
+# eggnog_annotation_summ_isol_red <- eggnog_annotation_summ_isol_red %>% left_join(eggnog_annotation_input_uniq %>% select(-n_inputs)) %>%
+#   left_join(eggnog_annotation_output_uniq %>% select(-n_outputs))
+# 
+# eggnog_annotation_summ_isol_red %>% pivot_longer(c(unique_inputs, unique_outputs)) %>%
+#   mutate(name = ifelse(name == "unique_inputs", "Signal transduction", "Response regulation")) %>%
+#   ggplot(aes(as.factor(genus_cluster), value, fill = as.factor(genus_cluster))) +
+#   geom_boxplot(outlier.size = 0.1) +
+#   facet_wrap(~name) +
+#   scale_fill_manual(values = c("#ff0029","#377eb8","#ff7f00","#fb8072","#80b1d3")) +
+#   labs(y = "# genes per genome [-]", x = "Genus") +
+#   theme(legend.position = "none")
+```
+
+# Sigma factors
+```{r}
+
+sigma_factors <- eggnog_annotation %>% filter(str_detect(PFAMs, "Sigma")) %>% left_join(metadata %>% select(legio_id, strain_cluster, species_info, genus_cluster_bestConcordance, genus_cluster_literature))
+sigma_factors %>% group_by(legio_id, Preferred_name, genus_cluster_bestConcordance) %>% summarise(n = n()) %>% 
+  ggplot(aes(Preferred_name, legio_id, fill = n)) +
+  geom_tile() + facet_wrap(~genus_cluster_bestConcordance, scales = "free_y")
+
+
+species_genomes_per_genus <- sigma_factors %>% group_by(genus_cluster_bestConcordance) %>% mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  summarise(n_genomes_genus = length(unique(legio_id)), n_species_genus = length(unique(species_cluster)))
+
+sigma_factors_summ <- sigma_factors %>% 
+  group_by(legio_id, Preferred_name, genus_cluster_bestConcordance) %>% 
+  sample_n(1) %>% # to make # genes and # genomes equivalent
+  group_by(Preferred_name, genus_cluster_bestConcordance) %>% 
+  summarise(n_genomes = n()) %>% 
+  left_join(species_genomes_per_genus) %>% 
+  mutate(perc_genomes_genus = n_genomes/n_genomes_genus)
+
+sigma_factors_summ %>% mutate(Preferred_name = ifelse(Preferred_name == "-", "Unclassified", Preferred_name)) %>% 
+  ggplot(aes(genus_cluster_bestConcordance, Preferred_name, size = perc_genomes_genus, col = (n_genomes_genus))) +
+  geom_point() + scale_y_discrete(limits=rev) +
+  labs(col = "Number of genomes\nin genus", size = "Percentage of genomes\nwith detected gene", x = "Genera") +
+  theme(axis.title.y = element_blank(), axis.text.x = element_blank())
+```

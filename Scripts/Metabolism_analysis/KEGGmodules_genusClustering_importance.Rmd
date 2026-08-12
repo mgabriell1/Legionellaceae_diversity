@@ -1,0 +1,61 @@
+---
+title: "Random forest KEGG modules"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(randomForest)
+library(Boruta)
+library(flexclust)
+```
+
+```{r test with fat dataset}
+# data(iris)
+# 
+# iris[,6:1000] <- rnorm(nrow(iris)*(1000-5))
+# rf <- randomForest(y = as.factor(iris[,5]), x = iris[,1:1000], importance = TRUE)
+# rf
+# varImpPlot(rf)
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+KEGGmodules_pca_res <- read_tsv(paste0(data_dir, "DRAM_results_analysis/legionomePangenome_KEGG_modules_PCA_coords.tsv"))
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_isolated_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  filter(isolated) %>% 
+  select(legio_id, genus_cluster_bestConcordance)
+```
+
+```{r}
+KEGGmodules <- KEGGmodules_pca_res %>% select(genus_cluster_bestConcordance, starts_with("M")) %>% 
+  mutate(genus_cluster_bestConcordance = as.factor(genus_cluster_bestConcordance))
+
+```
+
+```{r}
+KEGGmodules_clust1 <- KEGGmodules %>% 
+  mutate(genus_cluster_bestConcordance = ifelse(genus_cluster_bestConcordance == 1, 1, "other"))
+
+bor_KEGGmod_clust1 <- Boruta(y = as.factor(KEGGmodules_clust1$genus_cluster_bestConcordance), x = as.data.frame(KEGGmodules_clust1[,2:ncol(KEGGmodules_clust1)]), maxRuns = 10000)
+print(bor_KEGGmod_clust1)
+boruta_KEGGmod_out_clust1 <- tibble(Module = names(bor_KEGGmod_clust1$finalDecision), Decision = bor_KEGGmod_clust1$finalDecision, Problem = "Genus cluster 1 vs all")
+
+KEGGmodules_clust1_meanComple <- KEGGmodules_clust1 %>% 
+  group_by(genus_cluster_bestConcordance) %>% mutate(n_genomes = n()) %>% 
+  pivot_longer(-c(genus_cluster_bestConcordance, n_genomes)) %>% 
+  group_by(genus_cluster_bestConcordance, name) %>% 
+  summarise(n_genomes = unique(n_genomes), 
+            n_complete = sum(value > 0.75),
+            perc_complete = n_complete/n_genomes,
+            mean_completeness = mean(value),
+            sd_completeness = sd(value),) 
+KEGGmodules_clust1_meanComple%>% 
+  select(name, mean_completeness, genus_cluster_bestConcordance) %>% 
+  pivot_wider(names_from = genus_cluster_bestConcordance, values_from = mean_completeness) %>% 
+  filter(name %in% (boruta_KEGGmod_out_clust1 %>% filter(Decision == "Confirmed") %>% pull(Module))) %>% view()
+```

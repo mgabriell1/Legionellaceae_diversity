@@ -1,0 +1,332 @@
+---
+title: "T1SS components BLASTp"
+output: html_notebook
+---
+
+Check for the detection of T1SS proteins with homology to the ones of L. pneumophila paris, used as model 
+
+```{r message=FALSE}
+library(rBLAST)
+library(Biostrings)
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r import Legionome gnomes info}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+LegioInfo_red <- LegioInfo %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, strain_cluster, tax_short, gtdbtk.classification, species_info, genus_cluster)
+
+aai_vs_Lp <- read_tsv("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/legionome_ANI_AAI/AAI_vs_Lpneumophila.tsv")
+
+```
+
+```{r}
+T1SS_files <- list.files(path = paste0(data_dir,"referenceProteins/T1SS_Lp/Lpneumophila_paris_referenceProteins"), full.names = TRUE)
+legionome_protFiles <- paste0(data_dir,"/proteinFolder_legionome/legiomePangenome_allProteins.fasta")
+
+```
+
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot <- tibble()
+
+for (i in 1:length(T1SS_files)){
+  SScomponent <- readAAStringSet(T1SS_files[i])
+  print(T1SS_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".seq","",word(T1SS_files[i], 11, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legioid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+  blastp_res_tot <- blastp_res_tot %>% bind_rows(blastp_res)
+}
+
+#write_tsv(blastp_res_tot, paste0(data_dir, "/referenceProteins/T1SS_Lp/T1SS_Lpneumophila_blastp.tsv"))
+
+```
+
+```{r}
+blastp_res_tot_T1SS_Lp <- read_tsv(paste0(data_dir, "/referenceProteins/T1SS_Lp/T1SS_Lpneumophila_blastp.tsv"))
+
+blastp_res_tot_T1SS_Lp_summary <- blastp_res_tot_T1SS_Lp %>% group_by(legioid) %>% arrange(sseqid) %>% 
+  mutate(prot_num = as.numeric(word(sseqid, 3, sep = "_")), avg_prot_num = median(prot_num)) %>% 
+  filter(abs(prot_num - avg_prot_num) < 25) %>% # To include only loci, not genes in other locations
+  summarise(n_components = n(), components = paste0(Target, collapse = ","), avg_pident = mean(pident))
+LegioInfo_red_blastp_T1SS_Lp_summary <- LegioInfo_red %>% left_join(blastp_res_tot_T1SS_Lp_summary, by = c("legio_id" = "legioid"))
+LegioInfo_red_blastp_T1SS_Lp_summary <- LegioInfo_red_blastp_T1SS_Lp_summary %>% left_join(aai_vs_Lp, by = c("legio_id" = "legioid_ref")) %>% 
+  group_by(genus_cluster) %>% mutate(avgGenus_AAI_vs_Lpneumophila = mean(AAI_vs_Lpneumophila))
+
+LegioInfo_red_blastp_T1SS_Lp_summary <- LegioInfo_red_blastp_T1SS_Lp_summary %>% 
+  mutate(T1SS_legio_presence = str_detect(components, "lssB") & str_detect(components, "lssD"), # as 10.1371/journal.pone.0223033
+         T1SS_legio_presence = ifelse(is.na(T1SS_legio_presence), FALSE, T1SS_legio_presence))
+
+LegioInfo_red_blastp_T1SS_Lp_summary %>% 
+  ggplot(aes(reorder(genus_cluster, -avgGenus_AAI_vs_Lpneumophila, mean), avg_pident, group = genus_cluster)) +
+  #geom_boxplot() +
+  geom_jitter(aes(col = AAI_vs_Lpneumophila)) +#, shape = species_info
+  labs(x = "Genus cluster", y = "Average percentage identity [%]", col = "AAI compared to <br> *L. pneumophila*") +
+  theme(axis.text.x = element_blank(), legend.title = ggtext::element_markdown())
+# Values above 90% pident are linked to L pneumophila and other genomes traditionally linked to subspecies plus 2 not named species
+
+```
+
+```{r}
+LegioInfo_red_blastp_T1SS_Lp_summary %>% 
+  ggplot(aes(AAI_vs_Lpneumophila, avg_pident)) + 
+  geom_point() +
+  geom_abline(a = 0 ,b = 1) + lims(x = c(45,100), y = c(45,100))
+
+t.test(LegioInfo_red_blastp_summary$avg_pident, LegioInfo_red_blastp_summary$AAI_vs_Lpneumophila, paired = TRUE) 
+
+
+#write_tsv(LegioInfo_red_blastp_T1SS_Lp_summary, paste0(data_dir, "/referenceProteins/T1SS_Lp/LegioInfo_T1SS_summary.tsv"))
+```
+
+```{r}
+blastp_res_tot_info <- blastp_res_tot %>% left_join(LegioInfo_red, by = c("legioid" = "legio_id")) 
+blastp_res_tot_info %>% 
+  ggplot(aes(Target, pident)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))#+
+  #facet_wrap(~genus_cluster_bestConcordance)
+
+
+```
+
+
+```{r}
+allT1SS_components <- gsub(".seq","",word(T1SS_files, 11, sep = "/"))
+
+missing_T1SS_components_binary <- blastp_res_tot %>% select(legioid, Target, pident)%>% pivot_wider(names_from = Target, values_from = pident) %>%  mutate(across(!legioid, function(x){ifelse(is.na(x), 0, 1)}))
+UpSetR::upset(as.data.frame(missing_T1SS_components_binary),nsets = 28, nintersects = 50)
+
+missing_T1SS_components_binary_info <- missing_T1SS_components_binary %>% 
+  mutate(Total = rowSums(select_if(., is.numeric), na.rm = TRUE)) %>% 
+  dplyr::rename(legio_id = legioid) %>% 
+  left_join(LegioInfo) 
+
+  
+missing_T1SS_components_binary_info %>% 
+  ggplot(aes(checkm2.Completeness, Total, col = isolated)) +
+  geom_point()
+cor.test(missing_T1SS_components_binary_info$Total, missing_T1SS_components_binary_info$checkm2.Completeness, method = "spearman")
+
+
+```
+
+
+```{r}
+LegioInfo_red_blastp_T1SS_Lp_summary %>% 
+  filter(str_count(components, "lssX|lssY|lssZ|lssA") == 4 & n_components < 6) %>% 
+  pull(species_cluster) %>% 
+  unique() %>% length()
+# entire lssX,lssY,lssZ,lssA locus without lssB & lssD in 66 species
+
+LegioInfo_red_blastp_T1SS_Lp_summary %>% 
+  filter(str_count(components, "lssX|lssY|lssZ|lssA") == 4 & n_components < 6) %>% 
+  pull(genus_cluster) %>% 
+  unique() %>% length()
+# entire lssX,lssY,lssZ,lssA locus without lssB & lssD in 6 genera
+```
+
+# Lb1ss
+
+```{r}
+T1SS_Lb1ss_files <- list.files(path = paste0(data_dir,"referenceProteins/T1SS_Lb1ss/Ltaurinensis_referenceProteins"), full.names = TRUE)
+
+```
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot_T1SS_Lb1ss <- tibble()
+
+for (i in 1:length(T1SS_Lb1ss_files)){
+  SScomponent <- readAAStringSet(T1SS_Lb1ss_files[i])
+  cat(T1SS_Lb1ss_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".fasta","",word(T1SS_Lb1ss_files[i], 11, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legioid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+  blastp_res_tot_T1SS_Lb1ss <- blastp_res_tot_T1SS_Lb1ss %>% bind_rows(blastp_res)
+}
+
+#write_tsv(blastp_res_tot_T1SS_Lb1ss, paste0(data_dir, "/referenceProteins/T1SS_Lb1ss/T1SS_Lb1ss_Ltaurinensis_blastp.tsv"))
+
+```
+```{r}
+blastp_res_tot_T1SS_Lb1ss_summary <- blastp_res_tot_T1SS_Lb1ss %>% group_by(legioid) %>% arrange(sseqid) %>% 
+  mutate(prot_num = as.numeric(word(sseqid, 3, sep = "_")), avg_prot_num = median(prot_num)) %>% 
+  filter(abs(prot_num - avg_prot_num) < 25) %>% # To include only loci, not genes in other locations
+  summarise(n_components = n(), components = paste0(Target, collapse = ","), avg_pident = mean(pident))
+LegioInfo_red_blastp_T1SS_Lb1ss_summary <- LegioInfo_red %>% left_join(blastp_res_tot_T1SS_Lb1ss_summary, by = c("legio_id" = "legioid")) %>% 
+  mutate(T1SS_legio_presence = str_detect(components, "B") & str_detect(components, "D"),
+         T1SS_legio_presence = ifelse(is.na(T1SS_legio_presence), FALSE, T1SS_legio_presence))
+
+#write_tsv(LegioInfo_red_blastp_T1SS_Lb1ss_summary, paste0(data_dir, "/referenceProteins/T1SS_Lb1ss/LegioInfo_T1SS_Lb1ss_summary.tsv"))
+
+```
+
+# Lb2ss
+
+```{r}
+T1SS_Lb2ss_files <- list.files(path = paste0(data_dir,"referenceProteins/T1SS_Lb2ss/Ltaurinensis_referenceProteins"), full.names = TRUE)
+
+```
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot_T1SS_Lb2ss <- tibble()
+
+for (i in 1:length(T1SS_Lb2ss_files)){
+  SScomponent <- readAAStringSet(T1SS_Lb2ss_files[i])
+  cat(T1SS_Lb2ss_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".fasta","",word(T1SS_Lb2ss_files[i], 11, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legioid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+  blastp_res_tot_T1SS_Lb2ss <- blastp_res_tot_T1SS_Lb2ss %>% bind_rows(blastp_res)
+}
+
+#write_tsv(blastp_res_tot_T1SS_Lb2ss, paste0(data_dir, "/referenceProteins/T1SS_Lb2ss/T1SS_Lb2ss_Ltaurinensis_blastp.tsv"))
+
+```
+```{r}
+blastp_res_tot_T1SS_Lb2ss_summary <- blastp_res_tot_T1SS_Lb2ss %>% group_by(legioid) %>% arrange(sseqid) %>% 
+  mutate(prot_num = as.numeric(word(sseqid, 3, sep = "_")), avg_prot_num = median(prot_num)) %>% 
+  filter(abs(prot_num - avg_prot_num) < 25) %>% # To include only loci, not genes in other locations
+  summarise(n_components = n(), components = paste0(Target, collapse = ","), avg_pident = mean(pident))
+LegioInfo_red_blastp_T1SS_Lb2ss_summary <- LegioInfo_red %>% left_join(blastp_res_tot_T1SS_Lb2ss_summary, by = c("legio_id" = "legioid")) %>% 
+  mutate(T1SS_legio_presence = str_detect(components, "B") & str_detect(components, "D"),
+         T1SS_legio_presence = ifelse(is.na(T1SS_legio_presence), FALSE, T1SS_legio_presence))
+
+#write_tsv(LegioInfo_red_blastp_T1SS_Lb2ss_summary, paste0(data_dir, "/referenceProteins/T1SS_Lb2ss/LegioInfo_T1SS_Lb2ss_summary.tsv"))
+
+```
+
+# Lrpss
+
+```{r}
+T1SS_Lrpss_files <- list.files(path = paste0(data_dir,"referenceProteins/T1SS_Lrpss/Ltaurinensis_referenceProteins"), full.names = TRUE)
+
+```
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot_T1SS_Lrpss <- tibble()
+
+for (i in 1:length(T1SS_Lrpss_files)){
+  SScomponent <- readAAStringSet(T1SS_Lrpss_files[i])
+  cat(T1SS_Lrpss_files[i])
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".fasta","",word(T1SS_Lrpss_files[i], 11, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legioid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+  blastp_res_tot_T1SS_Lrpss <- blastp_res_tot_T1SS_Lrpss %>% bind_rows(blastp_res)
+}
+
+#write_tsv(blastp_res_tot_T1SS_Lrpss, paste0(data_dir, "/referenceProteins/T1SS_Lrpss/T1SS_Lrpss_Ltaurinensis_blastp.tsv"))
+
+```
+```{r}
+blastp_res_tot_T1SS_Lrpss_summary <- blastp_res_tot_T1SS_Lrpss %>% group_by(legioid) %>% arrange(sseqid) %>% 
+  mutate(prot_num = as.numeric(word(sseqid, 3, sep = "_")), avg_prot_num = median(prot_num)) %>% 
+  filter(abs(prot_num - avg_prot_num) < 25) %>% # To include only loci, not genes in other locations
+  summarise(n_components = n(), components = paste0(Target, collapse = ","), avg_pident = mean(pident))
+LegioInfo_red_blastp_T1SS_Lrpss_summary <- LegioInfo_red %>% left_join(blastp_res_tot_T1SS_Lrpss_summary, by = c("legio_id" = "legioid")) %>% 
+  mutate(T1SS_legio_presence = str_detect(components, "B") & str_detect(components, "D"),
+         T1SS_legio_presence = ifelse(is.na(T1SS_legio_presence), FALSE, T1SS_legio_presence))
+
+#write_tsv(LegioInfo_red_blastp_T1SS_Lrpss_summary, paste0(data_dir, "/referenceProteins/T1SS_Lrpss/LegioInfo_T1SS_Lrpss_summary.tsv"))
+
+```
+
+
+```{r}
+# Check if any of the T1SS coincides with the ones detected TXSScan
+
+TXSScan_res_files <- list.files(paste0(data_dir, "/TXSScan_results/Best_solution"), full.names = TRUE)
+TXSScan_res <- read_tsv(TXSScan_res_files, id = "filename", comment = "#")
+
+TXSScan_res_T1SS <- TXSScan_res %>% filter(str_detect(gene_name, "T1SS"))
+
+
+# Filter blast hits for which the T1SS was confirmed (i.e., both B and D genes were detected). Then mark which genes have also been detected by TXSScan and then consider a system as already detected by blast if any of the genes included has been detected by blast
+blastp_res_tot_T1SS_Lp_TSSpresent <- blastp_res_tot_T1SS_Lp %>% filter(legioid %in% (LegioInfo_red_blastp_T1SS_Lp_summary %>% filter(T1SS_legio_presence) %>% pull(legio_id))) %>% mutate(prot_name = word(sseqid, 2, 3, sep = "_"))
+TXSScan_res_T1SS_Lp_blasted <- TXSScan_res_T1SS %>% mutate(TXSScan_blast_detected = hit_id %in% blastp_res_tot_T1SS_Lp_TSSpresent$prot_name) #%>% group_by(TXSScan_blast_detected) %>% summarise(n())
+TXSScan_res_T1SS_Lp_blasted_summary <- TXSScan_res_T1SS_Lp_blasted %>% mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_")) %>% group_by(legio_id,sys_id) %>% 
+  summarise(blast_detected_T1SS_Lp = any(TXSScan_blast_detected))
+
+blastp_res_tot_T1SS_Lb1ss_TSSpresent <- blastp_res_tot_T1SS_Lb1ss %>% filter(legioid %in% (LegioInfo_red_blastp_T1SS_Lb1ss_summary %>% filter(T1SS_legio_presence) %>% pull(legio_id))) %>% mutate(prot_name = word(sseqid, 2, 3, sep = "_"))
+TXSScan_res_T1SS_Lb1ss_blasted <- TXSScan_res_T1SS %>% mutate(TXSScan_blast_detected = hit_id %in% blastp_res_tot_T1SS_Lb1ss_TSSpresent$prot_name) #%>% group_by(TXSScan_blast_detected) %>% summarise(n())
+TXSScan_res_T1SS_Lb1ss_blasted_summary <- TXSScan_res_T1SS_Lb1ss_blasted %>% mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_")) %>% group_by(legio_id,sys_id) %>% 
+  summarise(blast_detected_T1SS_Lb1ss = any(TXSScan_blast_detected))
+
+blastp_res_tot_T1SS_Lb2ss_TSSpresent <- blastp_res_tot_T1SS_Lb2ss %>% filter(legioid %in% (LegioInfo_red_blastp_T1SS_Lb2ss_summary %>% filter(T1SS_legio_presence) %>% pull(legio_id))) %>% mutate(prot_name = word(sseqid, 2, 3, sep = "_"))
+TXSScan_res_T1SS_Lb2ss_blasted <- TXSScan_res_T1SS %>% mutate(TXSScan_blast_detected = hit_id %in% blastp_res_tot_T1SS_Lb2ss_TSSpresent$prot_name) #%>% group_by(TXSScan_blast_detected) %>% summarise(n())
+TXSScan_res_T1SS_Lb2ss_blasted_summary <- TXSScan_res_T1SS_Lb2ss_blasted %>% mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_")) %>% group_by(legio_id,sys_id) %>% 
+  summarise(blast_detected_T1SS_Lb2ss = any(TXSScan_blast_detected))
+
+blastp_res_tot_T1SS_Lrpss_TSSpresent <- blastp_res_tot_T1SS_Lrpss %>% filter(legioid %in% (LegioInfo_red_blastp_T1SS_Lrpss_summary %>% filter(T1SS_legio_presence) %>% pull(legio_id))) %>% mutate(prot_name = word(sseqid, 2, 3, sep = "_"))
+TXSScan_res_T1SS_Lrpss_blasted <- TXSScan_res_T1SS %>% mutate(TXSScan_blast_detected = hit_id %in% blastp_res_tot_T1SS_Lrpss_TSSpresent$prot_name) #%>% group_by(TXSScan_blast_detected) %>% summarise(n())
+TXSScan_res_T1SS_Lrpss_blasted_summary <- TXSScan_res_T1SS_Lrpss_blasted %>% mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_")) %>% group_by(legio_id,sys_id) %>% 
+  summarise(blast_detected_T1SS_Lrpss = any(TXSScan_blast_detected))
+
+
+TXSScan_res_T1SS_blasted_tot <- TXSScan_res_T1SS_Lp_blasted_summary %>% left_join(TXSScan_res_T1SS_Lb1ss_blasted_summary) %>% left_join(TXSScan_res_T1SS_Lb2ss_blasted_summary) %>% left_join(TXSScan_res_T1SS_Lrpss_blasted_summary)
+TXSScan_res_T1SS_blasted_tot <- TXSScan_res_T1SS_blasted_tot %>% mutate(TXSScan_unique_T1SS = !blast_detected_T1SS_Lp & !blast_detected_T1SS_Lb1ss & !blast_detected_T1SS_Lb2ss & !blast_detected_T1SS_Lrpss)
+write_tsv(TXSScan_res_T1SS_blasted_tot, paste0(data_dir, "/TXSScan_results/T1SS_TXSScan_vs_blastedGenes.tsv"))
+
+T1SS_legio <- TXSScan_res_T1SS_blasted_tot %>% group_by(legio_id) %>% 
+  summarise(T1SS_Lp = any(blast_detected_T1SS_Lp),
+            T1SS_Lb1ss = any(blast_detected_T1SS_Lb1ss),
+            T1SS_Lb2ss = any(blast_detected_T1SS_Lb2ss),
+            T1SS_Lrpss = any(blast_detected_T1SS_Lrpss),
+            T1SS_TXSScan = any(TXSScan_unique_T1SS))
+LegioInfo_red_T1SS_tot <- LegioInfo_red %>% left_join(T1SS_legio) %>% replace(is.na(.), FALSE)
+#write_tsv(LegioInfo_red_T1SS_tot, paste0(data_dir, "/TXSScan_results/LegioInfo_red_T1SS_tot.tsv"))
+
+```
+
+```{r}
+TXSScan_res_T1SS %>% group_by(filename, gene_name, sys_id) %>% 
+  summarise(n = n()) %>% #view()
+  ggplot(aes(gene_name, n)) +
+  geom_boxplot()
+
+# Only Legio03684 UserReplicon_T1SS_38 has two mfp genes which are 68% similar (OIIFCL_01460 and OIIFCL_01440).
+# Excluded this from analysis
+
+TXSScan_res_T1SS_TXSScan_only <- TXSScan_res_T1SS %>% mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_")) %>%
+  filter(legio_id %in% (LegioInfo_red_T1SS_tot %>% filter(T1SS_TXSScan) %>% pull(legio_id)))
+# Remove T1SS detected by blast
+
+T1SS_mfp_genes <- TXSScan_res_T1SS_TXSScan_only %>% filter(gene_name == "T1SS_mfp" & sys_id != "UserReplicon_T1SS_38") %>% pull(hit_id)
+T1SS_mfp <- refProt[str_detect(names(refProt), paste0(T1SS_mfp_genes, collapse = "|"))]
+writeXStringSet(T1SS_mfp, paste0(data_dir, "/TXSScan_results/T1SS_mfp_TXSScan_only.faa"))
+
+T1SS_omf_genes <- TXSScan_res_T1SS_TXSScan_only %>% filter(gene_name == "T1SS_omf" & sys_id != "UserReplicon_T1SS_38") %>% pull(hit_id)
+T1SS_omf <- refProt[str_detect(names(refProt), paste0(T1SS_mfp_genes, collapse = "|"))]
+writeXStringSet(T1SS_omf, paste0(data_dir, "/TXSScan_results/T1SS_omf_TXSScan_only.faa"))
+
+# then concatenated and aligned using concatenator and then phylogeny
+```

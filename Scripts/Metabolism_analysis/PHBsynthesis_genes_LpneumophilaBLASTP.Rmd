@@ -1,0 +1,120 @@
+---
+title: "Serine acet components BLASTp"
+output: html_notebook
+---
+
+Check for the detection of T1SS proteins with homology to the ones of L. pneumophila paris, used as model 
+
+```{r message=FALSE}
+library(rBLAST)
+library(Biostrings)
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r import Legionome gnomes info}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+LegioInfo_red <- LegioInfo %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, species_info, genus_cluster, isolated, checkm2.Completeness)
+
+aai_vs_Lp <- read_tsv("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/legionome_ANI_AAI/AAI_vs_Lpneumophila.tsv")
+
+gene_families <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/gene_families.tsv"), col_names = FALSE)
+colnames(gene_families) <- c("gene_family", "prot_id", "frag")
+```
+
+```{r}
+PHB_files <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/referenceProteins/PHBsynthesis/Lpneumophila_paris_referenceProteins/all_Lpp_PHBgenes.fasta"
+#list.files(path = paste0(data_dir,"referenceProteins/PHBsynthesis/Lpneumophila_paris_referenceProteins"), full.names = TRUE) # gene ids from 10.1074/jbc.M115.693481
+legionome_protFiles <- paste0(data_dir,"/proteinFolder_legionome/legiomePangenome_allProteins.fasta")
+
+```
+
+```{r}
+refProt <- readAAStringSet(legionome_protFiles)
+#makeblastdb(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), dbtype = "prot")
+db <- blast(file.path(data_dir, "proteinFolder_legionome/legiomePangenome_allProteins.fasta"), type = "blastp")
+blastp_res_tot <- tibble()
+
+for (i in 1:length(PHB_files)){
+  SScomponent <- readAAStringSet(PHB_files[i])
+  cat(PHB_files[i],"\n")
+  
+  blastp_res <- predict(db, SScomponent, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+  blastp_res <- blastp_res %>% mutate(Target = gsub(".seq","",word(PHB_files[i], 11, sep = "/")),
+                                      legioid = word(sseqid, 1, sep = "_")) %>% 
+    group_by(legioid, qseqid) %>% filter(qcovs >= 65 & bitscore > 50 & evalue < 1e-3 & pident > 30) %>% 
+    filter(bitscore == max(bitscore)) %>% filter(evalue == min(evalue)) # Double filter to remove hits with equal bitscore
+  
+  blastp_res_tot <- blastp_res_tot %>% bind_rows(blastp_res)
+}
+blastp_res_tot <- blastp_res_tot %>% mutate(step = word(qseqid, 1, sep = "_"))
+
+#write_tsv(blastp_res_tot, paste0(data_dir, "/referenceProteins/PHBsynthesis/PHBsynthesis_Lpneumophila_blastp.tsv"))
+
+```
+
+```{r}
+blastp_res_tot <- read_tsv(paste0(data_dir, "/referenceProteins/PHBsynthesis/PHBsynthesis_Lpneumophila_blastp.tsv"))
+
+blastp_res_tot_summary <- blastp_res_tot %>% group_by(legioid,step) %>% 
+  summarise(n_genes = n(), components = paste0(Target, collapse = ","), avg_pident = mean(pident))
+LegioInfo_red_blastp_summary <- LegioInfo_red %>% left_join(blastp_res_tot_summary, by = c("legio_id" = "legioid"))
+LegioInfo_red_blastp_summary <- LegioInfo_red_blastp_summary %>% left_join(aai_vs_Lp, by = c("legio_id" = "legioid_ref")) %>% 
+  group_by(genus_cluster) %>% mutate(avgGenus_AAI_vs_Lpneumophila = mean(AAI_vs_Lpneumophila))
+
+
+LegioInfo_red_blastp_summary %>% 
+  ggplot(aes(step, reorder(legio_id, -AAI_vs_Lpneumophila, mean), col = avg_pident)) +
+  geom_point()
+  
+LegioInfo_PHBsynthesis <- LegioInfo_red_blastp_summary %>% 
+  group_by(legio_id, genus_cluster, isolated, checkm2.Completeness) %>% 
+  summarise(steps_present = paste0(unique(step), collapse = ","),
+            avg_pident_all = mean(avg_pident)) %>% 
+  mutate(all_steps = str_count(steps_present, "step") == 4,
+         missing_only_stepR = str_count(steps_present, "step") == 3 & !str_detect(steps_present, "stepR"),
+         step3_present = str_detect(steps_present, "step3"),
+         altPathway_931_932 = str_detect(steps_present, "lpp0931") & str_detect(steps_present, "lpp0932"),
+         altPathway_2632_932 = str_detect(steps_present, "lpp2632") & str_detect(steps_present, "lpp0932"),
+         altPathway_1554_933 = str_detect(steps_present, "lpp1554") & str_detect(steps_present, "lpp0933")) %>% 
+  mutate(itol_value_mainPathwayLp = case_when(all_steps ~ 1,
+                                missing_only_stepR ~ 0,
+                                TRUE ~ -1))
+
+LegioInfo_PHBsynthesis %>% 
+  ggplot(aes(checkm2.Completeness, str_count(steps_present, ","), col = isolated)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+with(LegioInfo_PHBsynthesis %>% filter(!isolated), cor.test(checkm2.Completeness, str_count(steps_present, ","), method = "spearman"))
+# Very weak correlation between the number of steps present and the genome completeness (rho = 0.34, p-val = 0.014).
+
+LegioInfo_PHBsynthesis %>% 
+  ggplot(aes(genus_cluster, fill = interaction(all_steps, missing_only_stepR))) +
+  geom_bar()
+# There seem to be some phylogenetic signal, but this has to be seen on tree
+
+#write_tsv(LegioInfo_PHBsynthesis, paste0(data_dir, "/referenceProteins/PHBsynthesis/LegioInfo_PHBsynthesis_summary.tsv"))
+
+
+```
+
+```{r}
+PHB_genes <- readAAStringSet(file.path(data_dir, "referenceProteins/PHBsynthesis/Lpneumophila_paris_referenceProteins/all_Lpp_PHBgenes.fasta"))
+#makeblastdb(file.path(data_dir, "referenceProteins/PHBsynthesis/Lpneumophila_paris_referenceProteins/all_Lpp_PHBgenes.fasta"), dbtype = "prot")
+db_PHB <- blast(file.path(data_dir, "referenceProteins/PHBsynthesis/Lpneumophila_paris_referenceProteins/all_Lpp_PHBgenes.fasta"), type = "blastp")
+
+PHB_genes_crossBlasting_raw <- predict(db_PHB, PHB_genes, custom_format = "qseqid sseqid pident bitscore evalue length qcovs qcovhsp")
+PHB_genes_crossBlasting <- PHB_genes_crossBlasting_raw %>% filter(qcovs >= 80 & bitscore > 50 & evalue < 1e-3 & pident > 30)
+# step3 genes are more similar among each other (up to 90%, even though in case of lpp0650 the maximum value is 39%), while in other cases is 65% which seems different enough to potentially have different best hits.
+
+blastp_res_tot %>% group_by(legioid, step) %>% 
+  summarise(n_lpp_genes_matching = length(unique(Target)),
+            n_target_homologues_genes = length(unique(sseqid)))
+# Not even L. pneumophila genomes have the same number of different hits than the targets so let's not do this
+```
+

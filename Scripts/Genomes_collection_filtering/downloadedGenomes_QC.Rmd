@@ -1,0 +1,198 @@
+---
+title: "downloadedGenomes QC"
+output: html_notebook
+---
+
+Merge genome LegioID_genomesTableNR with downloaded genomes QC carried out using CheckM2, GUNC and GTDB-Tk
+
+```{r import-data&merge}
+library(tidyverse)
+
+main_folder <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/"
+
+LegioID_genomesTableNR <- read_delim(paste0(main_folder,"Data/LegioID_genomesTableNR.tsv"), 
+    delim = "\t", escape_double = FALSE, 
+    col_types = cols(accession_gem = col_character(), 
+        accession_mgnify = col_character(), 
+        accession_oceandna = col_character(), 
+        buck2021_bin_id = col_character(), 
+        zhou2022_bin_id = col_character(), 
+        pintolab_dw_bin_id = col_character(), 
+        environmental_medium = col_character(), 
+        geographic_origin = col_character(), 
+        biome = col_character()), trim_ws = TRUE)
+
+checkm2_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_checkm2.quality_report.tsv"))
+gunc_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_GUNC.progenomes_2.1.maxCSS_level.tsv"), na = "nan")
+gtdbtk_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_gtdbtk.bac120.summary.tsv"))
+
+# Extract LegioID from tables and rename columns
+colnames(checkm2_results) <- paste0("checkm2.", colnames(checkm2_results))
+checkm2_results <- checkm2_results %>% mutate(legio_id = word(checkm2.Name, sep = "_", start = 1)) %>% select(-checkm2.Name)
+colnames(gunc_results) <- paste0("gunc.", colnames(gunc_results))
+gunc_results <- gunc_results %>% mutate(legio_id = word(gunc.genome, sep = "_", start = 1)) %>% select(-gunc.genome)
+colnames(gtdbtk_results) <- paste0("gtdbtk.", colnames(gtdbtk_results))
+gtdbtk_results <- gtdbtk_results %>% mutate(legio_id = word(gtdbtk.user_genome, sep = "_", start = 1)) %>% select(-gtdbtk.user_genome)
+
+
+# Merge tables based on LegioID
+LegioID_genomesTableNR <- LegioID_genomesTableNR %>% left_join(checkm2_results) %>% left_join(gunc_results) %>% left_join(gtdbtk_results)
+```
+
+Check genomes with no QC data (the ones from Buck2021 should have no QC since freshstatDB not accessible, 01/06/23)
+
+```{r check-missing-qc}
+
+LegioID_genomesTableNR %>% filter(is.na(checkm2.Completeness) | is.na(gunc.n_genes_called) | is.na(gtdbtk.classification))
+
+# Only 8 genomes with buck2021_bin_id -> all genomes QCed!
+
+LegioID_genomesTableNR_filtered_QCed <- LegioID_genomesTableNR %>% filter(!(is.na(checkm2.Completeness) | is.na(gunc.n_genes_called) | is.na(gtdbtk.classification)))
+
+
+```
+
+Inspect whether some retrieved genomes do not belong to f\_\_Legionellaceae (following GTDB-Tk classification)
+
+```{r gtdb-classification-check}
+
+LegioID_genomesTableNR_filtered_QCed %>% filter(!str_detect(gtdbtk.classification, "f__Legionellaceae;")) %>% 
+  select(legio_id, source, gtdbtk.classification, checkm2.Genome_Size, checkm2.Completeness, checkm2.Contamination, gunc.clade_separation_score)
+
+# 12 out of 4930 (0.2%) genomes not classified as f__Legionellaceae, from either NCBI or IMG
+# IMG genomes are not classified as they consist of just very small genomes (~2% completeness)
+# NCBI ones are mostly belonging to different orders, while one belongs to o__Legionellales_A;f__Legionellaceae_A a paraphylectic group which contains only one species in GTDB
+
+LegioID_genomesTableNR_filtered_QCed_tax <- LegioID_genomesTableNR_filtered_QCed %>% filter(str_detect(gtdbtk.classification, "f__Legionellaceae;"))
+
+LegioID_genomesTableNR_filtered_QCed_tax %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 6, end = 7, sep = ";")) %>% 
+  ggplot(aes(specie_name)) +
+  geom_bar() + coord_flip() + scale_y_log10()
+```
+
+Check GUNC CSS score, correlation with CheckM2 and overcontaminated clades
+
+```{r gunc-check}
+
+LegioID_genomesTableNR_filtered_QCed_tax %>% filter(!gunc.pass.GUNC) %>% nrow()
+# 425 out of 4918 (8.6%) genomes do not pass GUNC CSS criteria
+
+LegioSpecies_gunc.fail_perc <- LegioID_genomesTableNR_filtered_QCed_tax %>% group_by(gtdbtk.classification) %>% 
+  summarise(gunc.fail_perc = sum(!gunc.pass.GUNC)/n()) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";"))
+LegioSpecies_gunc.fail_perc %>% filter(gunc.fail_perc > 0) %>% nrow()
+# 24 out of 124 (19.4%) species have some genomes which fail GUNC CSS criteria
+
+LegioSpecies_gunc.fail_perc %>% 
+  filter(gunc.fail_perc > 0) %>% 
+  ggplot(aes(specie_name, gunc.fail_perc, fill = specie_name)) + geom_col() +
+  theme(legend.position = "none") + coord_flip()
+# The fraction of rejected genomes per specie is usually low with increasing percentages in genomes with less detailed classification (e.g., g__;s__) which is reasonable
+# In some cases however the percentages are between 50-100% likely due the the low number of genomes in these species -> check the CSS values of these cases (i.e., a CSS of 0.46 is definitely different than 0.7)
+```
+Inspect CSS values in species with high percentages of GUNC fails
+```{r gunc-check-2}
+
+high_guncFail_species <- LegioSpecies_gunc.fail_perc %>% 
+  filter(gunc.fail_perc >= 0.50) %>% pull(gtdbtk.classification)
+
+LegioID_genomesTableNR_filtered_QCed_tax %>% filter(gtdbtk.classification %in% high_guncFail_species) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";")) %>%
+  select(legio_id,accession_assembly,specie_name, checkm2.Completeness,checkm2.Contamination,gunc.clade_separation_score,gunc.reference_representation_score,gtdbtk.classification) %>% 
+  view() 
+
+LegioID_genomesTableNR_filtered_QCed_tax %>% filter(gtdbtk.classification %in% high_guncFail_species) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";")) %>% 
+  ggplot(aes(specie_name, gunc.clade_separation_score, col = gunc.clade_separation_score)) +
+  geom_point() +
+  geom_hline(yintercept = 0.45) +
+  theme(legend.position = "none") + coord_flip()
+# Several CSS values are very close to the 0.45 threshold. In case of genomes within the reference DB the optimal CSS increases (see Figure S12 in GUNC manuscript)
+```
+
+```{r gunc-css-filtering}
+### TO BE ADAPTED BASED ON GUNC DEVEL REPLY
+CSS_thresh <- 0.45
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc <- LegioID_genomesTableNR_filtered_QCed_tax %>% 
+  filter((gunc.clade_separation_score <= CSS_thresh | is.na(gunc.pass.GUNC)))
+# Retain only genomes with CSS below threshold 
+
+```
+
+CheckM2 filtering
+```{r checkm2-filtering}
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% 
+  mutate(inRefSeq = ifelse(!str_detect(accession_assembly, "GCF") | is.na(accession_assembly), FALSE, TRUE)) %>% 
+  ggplot(aes(checkm2.Completeness,checkm2.Contamination, col = inRefSeq)) + 
+  geom_point() + facet_wrap(~inRefSeq)
+# Rather than incomplete genomes (most have completeness above 50%) the issue seems contamination
+# As expectable, most RefSeq genomes have very high completion and low contamination predicted by CheckM2 (even though in some cases the values go above 5%). Still contamination is further detected.
+
+```
+
+Check contamination per specie
+```{r checkm2-contamination-species, warning=FALSE}
+LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";")) %>% 
+  ggplot(aes(specie_name, checkm2.Contamination, group = specie_name)) +
+  geom_boxplot(outlier.size = 0.1) + 
+  coord_flip()
+# Contamination usually low, expect for few species
+
+```
+
+```{r checkm2-overremoved-species}
+
+LegioSpecies_checkm2.contam_fail_perc <- LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% group_by(gtdbtk.classification) %>% 
+  summarise(checkm2.contam_fail_perc = sum(checkm2.Contamination > 5)/n()) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";"))
+
+LegioSpecies_checkm2.contam_fail_perc %>% filter(checkm2.contam_fail_perc > 0) %>% 
+  ggplot(aes(specie_name, checkm2.contam_fail_perc, fill = specie_name)) + geom_col() +
+  theme(legend.position = "none") + coord_flip()
+
+```
+```{r checkm2-overremoved-species2}
+
+high_checkm2Fail_species <- LegioSpecies_checkm2.contam_fail_perc %>% filter(checkm2.contam_fail_perc >= 0.5) %>% pull(gtdbtk.classification)
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% filter(gtdbtk.classification %in% high_checkm2Fail_species) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";")) %>%
+  select(legio_id,accession_assembly,specie_name, checkm2.Completeness,checkm2.Contamination,gunc.clade_separation_score,gunc.reference_representation_score,gtdbtk.classification) %>% 
+  view() 
+
+```
+
+```{r checkm2-filter}
+checkm2_contam_thresh <- 5
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont <- LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% filter(checkm2.Contamination <= checkm2_contam_thresh)
+
+#quantile(LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont$checkm2.Completeness)
+comple_tresh_list <- seq(50,95,1)
+retained_species_list <- c()
+for (c in comple_tresh_list) {
+  retained_species <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont %>% filter(checkm2.Completeness > c) %>% pull(gtdbtk.classification) %>% unique() %>% length()
+  retained_species_list <- c(retained_species_list, retained_species)
+}
+
+plot(comple_tresh_list, retained_species_list)
+# Completion of 85 seems like a good trade-off between retaining species and having high completion
+# Also Koestbachler et al (2021) uses this cutoff
+
+checkm2_compl_thresh <- 85
+LegioSpecies_checkm2.compl_fail_perc <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont %>% 
+  group_by(gtdbtk.classification) %>% 
+  summarise(checkm2.fail_completeness_perc = sum(checkm2.Completeness < checkm2_compl_thresh)/n()) %>% 
+  mutate(specie_name = word(gtdbtk.classification, start = 5, end = 7, sep = ";"))
+
+LegioSpecies_checkm2.compl_fail_perc %>% filter(checkm2.fail_completeness_perc > 0) %>% 
+  ggplot(aes(specie_name, checkm2.fail_completeness_perc, fill = specie_name)) + geom_col() +
+  theme(legend.position = "none") + coord_flip()
+# Species affected by completeness threshold
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont %>% filter(checkm2.Completeness >= checkm2_compl_thresh)
+
+```

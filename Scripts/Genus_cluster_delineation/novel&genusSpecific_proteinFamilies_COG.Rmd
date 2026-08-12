@@ -1,0 +1,74 @@
+---
+title: "New proteins vs already known ones"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster)
+
+eggnog_annotation_files <- list.files(paste0(data_dir, "eggNOG_annotations/"), pattern = "annotations$", recursive = TRUE, full.names = TRUE)
+eggnog_annotation <- read_tsv(eggnog_annotation_files, id = "filename", comment = "##")
+eggnog_annotation <- eggnog_annotation %>% mutate(legio_id = gsub("_eggNOG", "", word(filename, 10, sep = ("/")))) %>% select(-filename) %>% relocate(legio_id)
+
+gene_families <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/gene_families.tsv"), col_names = FALSE)
+colnames(gene_families) <- c("gene_family", "prot_id", "frag")
+
+bakta_annotation_files <- list.files(paste0(data_dir, "proteinFolder_Legionome/gff3_files"), full.names = TRUE)
+bakta_annotations <- read_tsv(bakta_annotation_files, comment = "#", col_names = FALSE, id = "filename")
+bakta_annotations <- bakta_annotations %>% filter(!is.na(X2)) %>% mutate(legio_id = word(word(filename, 10, sep = "/"), 1, sep = "_"))
+```
+
+```{r}
+bakta_annotations <- bakta_annotations %>% 
+  mutate(prot_id = gsub("ID=","",word(X9, 1, sep = ";")),
+         hypotheticalProtein = str_detect(X9, "Name=hypothetical protein"),
+         PFAMdomains = str_detect(X9, "Dbxref=PFAM:"))
+
+gene_families_annotation <- gene_families %>% 
+  left_join(bakta_annotations %>% select(legio_id, prot_id, hypotheticalProtein, PFAMdomains), by = "prot_id") %>% 
+  left_join(eggnog_annotation, by = c("prot_id" = "#query", "legio_id")) %>% 
+  left_join(metadata_red %>% select(legio_id, species_info, genus_cluster), by = "legio_id") %>% 
+  mutate(COG_category = case_when(is.na(COG_category) ~ "-",
+                                  TRUE ~ COG_category))
+
+gene_families_annotation_long <- gene_families_annotation %>% separate_longer_position(COG_category, width = 1)
+
+gene_families_annotation_long <- gene_families_annotation_long %>% 
+  mutate(COG_category = case_when(hypotheticalProtein & PFAMdomains ~ "Hypothetical proteins with PFAM domains",
+                                  hypotheticalProtein & !PFAMdomains ~ "Hypothetical proteins without PFAM domains",
+                                  TRUE ~ COG_category))
+
+```
+
+
+```{r}
+gene_families_annotation_novelTaxa_genera <- gene_families_annotation_long %>% 
+  filter(species_info == "Not named") %>% 
+  group_by(gene_family, COG_category) %>% 
+  summarise(n_genus = length(unique(genus_cluster)),
+            genus_cluster = paste0(unique(genus_cluster), collapse = ";")) 
+
+gene_families_annotation_novelTaxa_genera %>% 
+  filter(n_genus == 1) %>% 
+  mutate(COG_category = factor(COG_category, levels = c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "S", "T", "U", "V", "W", "Z", "-", 
+                                                        "Hypothetical proteins with PFAM domains", "Hypothetical proteins without PFAM domains"))) %>% 
+  ggplot(aes(COG_category, fill = COG_category)) +
+  geom_bar() +
+  facet_wrap(~genus_cluster, ncol = 3) +
+  scale_fill_manual(values = pals::glasbey(26)) +
+  scale_y_log10("Number of gene families [-]") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), axis.title.x = element_blank(), legend.position = "none")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/proteinFamilies_COG_novel&genusSpecific.pdf", dpi = 600, height = 10, width = 15)
+```
+
+

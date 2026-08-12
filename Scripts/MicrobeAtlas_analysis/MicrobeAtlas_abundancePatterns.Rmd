@@ -1,0 +1,587 @@
+---
+title: "MicrobeAtlas Legionella"
+output: html_notebook
+---
+
+
+```{r message=FALSE, warning=FALSE}
+library(readr)
+library(tidyverse)
+library(rBLAST)
+library(Biostrings)
+library(rstatix)
+library(ape)
+library(infotheo)
+library(ANCOMBC)
+theme_set(theme_classic(base_size = 16))
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+LegioInfo <- LegioInfo %>% 
+  mutate(species_clust = word(strain_cluster, start = 1, end = 2, sep = "_"))
+
+
+otus_99 <- read_delim(paste0(data_dir,"/MicrobeAtlas_analysis_files/otus.99.allinfo"), 
+                      delim = "\t", escape_double = FALSE, 
+                      col_names = FALSE, trim_ws = TRUE)
+
+
+```
+
+# Get MicrobeAtlas into fasta
+```{r}
+otus_99_red <- otus_99 %>% select(X1, X7) %>% 
+  mutate(X1 = paste0(">", X1))
+
+seqs <- c(rbind(otus_99_red$X1, otus_99_red$X7))
+write(x = seqs, file = paste0(data_dir,"/MicrobeAtlas_analysis_files/otus.99.fasta"))
+
+```
+
+
+# Read 16S files for pangenome genomes 
+```{r}
+
+amplicons_files_all <- list.files(paste0(data_dir, "predicted&blasted_16SrRNAgenes"), full.names = TRUE, pattern = "ffn")
+amplicons_files_pangenome <- amplicons_files_all[str_detect(amplicons_files_all, paste0(LegioInfo$legio_id, collapse = "|"))]
+
+amplicons <- readDNAStringSet(amplicons_files_pangenome)
+
+```
+
+# Refine 16S seqs to keep one per genome excluding the ones with Ns
+```{r}
+
+amplicons_info <- tibble(gene_id = names(amplicons), Ns = vcountPattern("N", amplicons))
+amplicons_info <- amplicons_info %>% mutate(legio_id = word(gene_id, 1, sep = "__"))
+
+amplicons_info_ref <- amplicons_info %>% group_by(legio_id) %>% 
+  filter(Ns == min(Ns)) %>% 
+  slice_sample(n = 1)
+
+amplicons_ref <- amplicons[names(amplicons) %in% amplicons_info_ref$gene_id]
+LegioInfo_16S_species <- LegioInfo %>% filter(available_16SrRNA) %>% group_by(species_clust) %>% slice_sample(n = 1)
+
+amplicons_ref_species <- amplicons_ref[str_detect(names(amplicons_ref), paste0(LegioInfo_16S_species$legio_id, collapse = "|"))]
+#Biostrings::writeXStringSet(amplicons_ref, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_16SrRNAseqs_refined.fasta"))
+```
+
+# Find 16S rRNA genes from other  
+```{r}
+LegionomeTot_species_info <- read_tsv(paste0(data_dir, "/secondaryCluster_total.tsv"))
+LegionomeTot_16Sgenes <- readDNAStringSet(paste0(data_dir, "legionome_16S_tot.fasta"))
+
+LegionomeTot_species_info_no16Srepresentatives <- LegionomeTot_species_info %>% 
+  filter((species_cluster %in% (LegioInfo %>% group_by(species_clust) %>% mutate(available_16SrRNA_species = any(available_16SrRNA)) %>% filter(!available_16SrRNA_species) %>% pull(species_clust))))
+
+LegionomeTot_available16SrRNA <- names(LegionomeTot_16Sgenes) 
+LegionomeTot_available16SrRNA_Ns <- vcountPattern("N", LegionomeTot_16Sgenes)
+LegionomeTot_16SrRNA_dat <- tibble(gene = LegionomeTot_available16SrRNA,
+                                   Ns = LegionomeTot_available16SrRNA_Ns) %>% 
+  mutate(legio_id = word(gene, 1, sep = "__"))
+
+genomes_to_supply_speciesClusters_without_16S <- LegionomeTot_species_info_no16Srepresentatives %>% 
+  dplyr::rename(legio_id = LegioID) %>% 
+  left_join(LegionomeTot_16SrRNA_dat) %>% 
+  filter(!is.na(Ns)) %>% # remove legio_id without a 16S rRNA gene
+  group_by(species_cluster) %>% 
+  filter(Ns == min(Ns)) %>% # keep only the genes with the lowest number of Ns
+  slice_sample(n = 1)
+
+additional_16SrRNA_noRepresentatives <- LegionomeTot_16Sgenes[names(LegionomeTot_16Sgenes) %in% genomes_to_supply_speciesClusters_without_16S$gene]
+```
+
+
+```{r}
+amplicons_ref_species <- c(amplicons_ref_species,additional_16SrRNA_noRepresentatives)
+
+tot_species_clust_info <- LegioInfo_16S_species %>% 
+  select(legio_id, species_clust) %>% dplyr::rename(species_cluster = species_clust) %>% 
+  bind_rows(genomes_to_supply_speciesClusters_without_16S %>% select(legio_id, species_cluster))
+
+for (i in 1:nrow(tot_species_clust_info)){
+  names(amplicons_ref_species) <- gsub(tot_species_clust_info$legio_id[i], paste0(tot_species_clust_info$legio_id[i],"__",tot_species_clust_info$species_cluster[i]), names(amplicons_ref_species))
+}
+
+Biostrings::writeXStringSet(amplicons_ref_species, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_16SrRNAseqs_refined_species.fasta"))
+
+```
+
+
+<!-- # BLAST Legionome amplicons against MicrobeAtlas --> # removed in favor of MMseqs rbh workflow
+<!-- ```{r} -->
+<!-- #makeblastdb(file.path(data_dir,"/MicrobeAtlas_analysis_files/otus.99.fasta"), dbtype = "nucl") -->
+<!-- db <- blast(file.path(data_dir,"/MicrobeAtlas_analysis_files/otus.99.fasta"), type = "blastn") -->
+
+<!-- blastn_res <- predict(db, amplicons_ref, custom_format = "qseqid sseqid pident bitscore evalue length qcovs") -->
+
+<!-- blastn_res_ref <- blastn_res %>% group_by(qseqid) %>%  -->
+<!--   filter(bitscore == max(bitscore)) %>%  -->
+<!--   mutate(legio_id = word(qseqid, 1, sep = "__")) %>%  -->
+<!--   left_join(LegioInfo %>% select(legio_id, strain_cluster, gtdbtk.classification)) %>%  -->
+<!--   left_join(otus_99 %>% select(X1, X9), by = c("sseqid" = "X1")) %>%  -->
+<!--   mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) -->
+<!-- write_tsv(blastn_res_ref, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_16SrRNA_mapping.tsv")) -->
+<!-- ``` -->
+
+<!-- # RemoveCorrect for multiple genomes in same species and remove amplicons with best hits on multiple species -->
+<!-- ```{r} -->
+<!-- blastn_res_ref_filtr <- blastn_res_ref %>%  -->
+<!--   group_by(sseqid) %>%  -->
+<!--   mutate(n_species_bestmatching = length(unique(species_cluster))) %>%  -->
+<!--   filter(n_species_bestmatching == 1) %>%  -->
+<!--   select(sseqid, gtdbtk.classification, species_cluster) %>%  -->
+<!--   distinct() -->
+<!-- write_tsv(blastn_res_ref, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_16SrRNA_mapping_refined.tsv")) -->
+<!-- ``` -->
+
+# Prepare grep to get only samples and selected OTUs
+```{r}
+mmseqs_res <- read_tsv(paste0(data_dir,"/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_rbh"), col_names = FALSE)
+
+mmseqs_res_ref <- mmseqs_res %>% 
+  filter(X1 != "Legio03973__22_1__LKDEBH_00020") %>% # remove two sequences belonging to the same species which were present for error
+  group_by(X2) %>% 
+  mutate(n_species_mapping = length(unique(word(X1, 2, sep = "__")))) %>% 
+  filter(n_species_mapping == 1) #remove OTUs for which multiple species are mapping to
+
+mmseqs_res_ref <- mmseqs_res_ref %>% 
+  mutate(species_clust = word(X1, 2, sep = "__")) %>% 
+  left_join(LegioInfo %>% select(species_clust, gtdbtk.classification) %>% distinct())
+write_tsv(mmseqs_res_ref, paste0(data_dir,"/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_rbh_refined.tsv"))
+  
+for (i in 1:nrow(mmseqs_res_ref)){
+  cat(round(i/nrow(mmseqs_res_ref), 2), " ")
+  string_command <- "grep -e '>' -e "
+  otu_temp <- mmseqs_res_ref$X2[i]
+  otu_temp_filename <- gsub(";","-",otu_temp)
+  otu_temp <- gsub("MAPv3;","",otu_temp)
+
+  string_command <- paste0(string_command, "'", otu_temp,"'", " /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/MicrobeAtlas_analysis_files/samples-otus.99.metag.minfilter > /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/MicrobeAtlas_analysis_files/samples-otus.99.metag.minfilter.", otu_temp_filename)
+  
+  #system(string_command)
+  print(string_command)
+}
+
+
+```
+
+```{bash}
+
+for i in `ls /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/MicrobeAtlas_analysis_files/samples-otus.99.metag.minfilter.MAPv3*`; do
+  echo "X1\tX2\tX3\tX4\tX5\tX6" > ${i}.wide
+  perl -0pe 's/\n90_/\t90_/g' $i >> ${i}.wide
+  
+done
+
+```
+
+```{r}
+
+otu_abund_files <- list.files("/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/MicrobeAtlas_analysis_files", pattern = "wide", full.names = TRUE)
+otu_abund_raw <- read_tsv(otu_abund_files, id = "filename", col_names = FALSE)
+samples_env <- read_tsv(paste0(data_dir, "/MicrobeAtlas_analysis_files/samples.env.info"), col_names = FALSE)
+
+
+
+otu_abund <- otu_abund_raw %>% filter(!is.na(X6)) %>% select(X1, X5, X6) %>% filter(X6 != "X6")
+otu_abund_wide <- otu_abund %>% mutate(X6 = as.numeric(X6)) %>% 
+  pivot_wider(names_from = X5, values_from = X6) %>% replace(is.na(.), 0) 
+otu_abund_wide_info <- otu_abund_wide %>% 
+  mutate(X1 = gsub(">","", X1)) %>% 
+  left_join(samples_env, by = c("X1"))
+write_tsv(otu_abund_wide_info, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_samples_abund.env.info"))
+
+```
+```{r}
+otu_abund_wide_info <- read_tsv(paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_samples_abund.env.info"))
+
+n_otus_sample <- otu_abund_wide_info %>% 
+  pivot_longer(starts_with("90_")) %>% group_by(X1) %>% 
+  summarise(n_otus_present = sum(value > 0))
+summary(n_otus_sample)
+n_otus_sample %>% 
+  ggplot(aes(n_otus_present)) + geom_histogram()
+
+
+otu_abund_wide_info_edit <- otu_abund_wide_info %>% 
+  separate_wider_delim(X2, delim = "|", names_sep = ".", too_few = "align_start") %>% # split major environment classes
+  pivot_longer(starts_with("X2.")) %>% filter(!is.na(value)) %>% 
+  separate_wider_delim(value, delim = ";", names_sep = ".", too_few = "align_start") %>% # Split major classes from their details
+  group_by(X1) %>% #group by sample
+  mutate(n_different_major_env_classes = length(unique(value.1))) %>% dplyr::rename(major_env_class = value.1) %>% 
+  filter(n_different_major_env_classes == 1) %>% # keep only the samples for which only one major env class is present (might have multiple subdetails, but still in the same major class)
+  select(-value.2) %>% distinct() # Remove detailed env class info and retain only one entry per sample
+ 
+ 
+otu_major_envs <- otu_abund_wide_info_edit %>% select(X1, starts_with("90_"), major_env_class) %>% 
+  pivot_longer(starts_with("90_")) %>% 
+  filter(value > 0) %>% 
+  group_by(name, major_env_class) %>% 
+  summarise(n_detections = n()) %>% 
+  group_by(name) %>% 
+  mutate(perc_detection = n_detections/sum(n_detections))
+write_tsv(otu_major_envs, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_majorEnvs_distribution.tsv"))
+```
+
+```{r}
+otu_major_envs <- read_tsv(paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_majorEnvs_distribution.tsv"))
+microbeatlas_rbh <- read_tsv(paste0(data_dir,"/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_rbh_refined.tsv")) 
+#
+microbeatlas_rbh <- microbeatlas_rbh %>% mutate(legio_id = word(X1, 1, sep = "__"))
+microbeatlas_rbh <- microbeatlas_rbh %>% left_join(LegioInfo %>% select(legio_id, genus_cluster)) %>% 
+  mutate(genus_cluster = ifelse(species_clust == "13_1", 6, genus_cluster))
+
+otu_major_envs <- otu_major_envs %>% left_join(microbeatlas_rbh %>% select(X2, genus_cluster) %>% mutate(name = gsub("MAPv3;","",X2)))
+
+otu_major_envs %>% 
+  mutate(otu_99 = word(name, 2, sep = "99_"),
+         major_env_class = str_to_sentence(major_env_class)) %>% 
+  left_join(otu_major_envs %>% filter(major_env_class == "animal") %>% dplyr::rename(perc_detection_animal = perc_detection) %>% select(name,perc_detection_animal)) %>% 
+  ggplot(aes(reorder(otu_99, -perc_detection_animal), perc_detection*100, fill = major_env_class)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 10)) +
+  scale_fill_manual(values = c("tomato2", "steelblue1", "yellowgreen", "tan2")) +
+  labs(x = "MicrobeAtlas 99% OTUs", y = "Percentage [%]", fill = "Environmental\nclass") +
+  ggforce::facet_row(~genus_cluster, scales = "free_x", space = "free")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/MicrobeAtlas_OTUs_majorEnvClass_genus.pdf", dpi = 600, width = 13)
+
+otu_major_envs %>% 
+  group_by(name, genus_cluster) %>% 
+  summarise(tot_detections = sum(n_detections)) %>%
+  filter(genus_cluster %in% c(1,6,13)) %>% 
+  ungroup() %>% 
+  rstatix::kruskal_test(tot_detections~ genus_cluster)
+  
+  
+otu_major_envs %>% 
+  mutate(otu_99 = word(name, 2, sep = "99_"),
+         major_env_class = str_to_sentence(major_env_class)) %>% 
+  left_join(otu_major_envs %>% filter(major_env_class == "animal") %>% dplyr::rename(perc_detection_animal = perc_detection) %>% select(name,perc_detection_animal)) %>% 
+  group_by(otu_99) %>% 
+  mutate(tot_detections = sum(n_detections)) %>% 
+  select(otu_99, tot_detections, perc_detection_animal, genus_cluster) %>% distinct() %>% 
+  ggplot(aes(reorder(otu_99, -perc_detection_animal), 1, size = tot_detections)) +
+  geom_point() +
+  scale_size_continuous(transform = "log10") +
+  ggforce::facet_row(~genus_cluster, scales = "free_x", space = "free")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/MicrobeAtlas_OTUs_totDetections_genus.pdf", dpi = 600, width = 13)
+
+otu_major_envs %>% 
+  mutate(otu_99 = word(name, 2, sep = "99_"),
+         major_env_class = str_to_sentence(major_env_class)) %>% 
+  ggplot(aes(otu_99, perc_detection*100, fill = major_env_class)) +
+  geom_col() +
+  scale_fill_manual(values = c("tomato2", "steelblue1", "yellowgreen", "tan2")) +
+  labs(x = "MicrobeAtlas 99% OTUs", y = "Percentage [%]", fill = "Environmental \nclass") +
+  coord_flip()
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/MicrobeAtlas_OTUs_majorEnvClass_vertical.pdf", dpi = 600, height = 9)
+
+otu_abund_wide_info_edit_descriptors <- otu_abund_wide_info_edit %>% 
+  separate_wider_delim(X5, delim = ";", names_sep = ".", too_few = "align_start") %>% 
+  select(-name) %>% 
+  pivot_longer(starts_with("X5.")) %>% 
+  filter(!is.na(value)) 
+
+otu_abund_wide_info_edit_descriptors %>% 
+  filter(major_env_class == "animal") %>% 
+  group_by(value) %>% 
+  summarise(n = n()) %>% 
+  filter(n > 100) %>% 
+  ggplot(aes(reorder(value, n, decreasing = TRUE), n)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(y = "# presences", x = "Tags in metadata")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/MicrobeAtlas_animalSamples_tags.pdf", dpi = 600, width = 11)  
+```
+
+```{r}
+
+otu_major_envs_wide <- otu_major_envs %>% 
+  select(name, genus_cluster, perc_detection, major_env_class) %>% 
+  pivot_wider(values_from = perc_detection, names_from = major_env_class) %>% 
+  replace(is.na(.), 0) #%>% filter(genus_cluster %in% c(1,6, 13))
+
+otu_major_envs_dist <- otu_major_envs_wide %>% select(animal, aquatic, plant, soil) %>% vegan::vegdist()
+vegan::adonis2(otu_major_envs_dist ~ genus_cluster, data = otu_major_envs_wide)
+
+```
+
+```{r}
+otus_cor <- otu_abund_wide_info %>% select(starts_with("90_")) %>% 
+  rstatix::cor_mat(method = "spearman")
+otus_cor_long <- otus_cor %>% rstatix::cor_gather()
+write_tsv(otus_cor_long,  paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_correlations.tsv"))
+
+otus_cor_long %>% 
+  filter(p < 0.05) %>% 
+  group_by(cor > 0, var1) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(var1, n, fill = `cor > 0`)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10))
+
+# otus_cor_long %>% 
+#   rownames_to_column() %>% 
+#   group_by(rowname) %>% 
+#   mutate(comb = paste0(str_sort(c(var1, var2)), collapse = ".")) %>% 
+#   select(-c(var1, var2)) %>% 
+#   distinct() %>% 
+#   separate_wider_delim(comb, delim = ".", names = c("var1", "var2")) %>% 
+#   filter(var1 != var2 & p < 0.05) %>% #& p < 0.05
+#   ggplot(aes(var1, var2, fill = cor, alpha = 1-(p))) +
+#   geom_tile() +
+#   #scale_fill_met_c("OKeeffe1")  +
+#   scale_fill_gradient2(low= "darkred", mid = "#f6f2ee", high = "darkcyan")  +
+#   scale_alpha_continuous(labels = c("0.04", "0.03", "0.02", "0.01", "< 0.01"), breaks = c(0.96, 0.97, 0.98, 0.99, 1)) +
+#   scale_x_discrete(position = "top") +
+#   theme(axis.text = element_blank(), aspect.ratio=1) +
+#   labs(fill = "Spearman \ncorrelation", alpha = "p-value")
+#   
+otus_cor_long %>% 
+  rownames_to_column() %>% 
+  group_by(rowname) %>% 
+  separate_wider_delim(var1, delim = ";", names_sep = "_") %>% 
+  separate_wider_delim(var2, delim = ";", names_sep = "_") %>% 
+  mutate(comb = paste0(str_sort(c(var1_5, var2_5)), collapse = ".")) %>% 
+  select(comb, cor, p) %>% 
+  distinct() %>% 
+  separate_wider_delim(comb, delim = ".", names = c("var1_5", "var2_5")) %>% 
+  mutate(var1_5 = gsub("99_", "", var1_5),
+         var2_5 = gsub("99_", "", var2_5)) %>% 
+  filter(var1_5 != var2_5 & p < 0.05) %>% #& p < 0.05
+  ggplot(aes(var1_5, var2_5, fill = cor, alpha = 1-(p))) +
+  geom_tile() +
+  #scale_fill_met_c("OKeeffe1")  +
+  scale_fill_gradient2(low= "darkred", mid = "#f6f2ee", high = "darkcyan")  +
+  scale_alpha_continuous(labels = c("0.04", "0.03", "0.02", "0.01", "< 0.01"), breaks = c(0.96, 0.97, 0.98, 0.99, 1)) +
+  scale_x_discrete(position = "top") +
+  theme(aspect.ratio=1, axis.text.y = element_text(size = 10), axis.text.x = element_text(angle = 45, hjust = 0, vjust = 0, size = 10), axis.title = element_blank()) +
+  labs(fill = "Spearman \ncorrelation", alpha = "p-value")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/Legionome_OTUs_correlations.pdf", dpi = 600, height = 8, width = 10)
+
+```
+```{r}
+
+otu_abund_ps <- otu_abund_wide_info %>% 
+  select(starts_with("90_")) %>% as.data.frame()
+rownames(otu_abund_ps) <- otu_abund_wide_info$X1
+otu_abund_ps <- otu_abund_ps %>% 
+  otu_table(taxa_are_rows = FALSE)
+
+
+otu_samples_ps <- otu_abund_wide_info %>% 
+  select(!starts_with("90_")) %>% as.data.frame()
+rownames(otu_samples_ps) <- otu_abund_wide_info$X1
+otu_samples_ps <- sample_data(otu_samples_ps)
+otu_ps <- phyloseq(otu_abund_ps,otu_samples_ps)
+
+
+secom_res <- secom_linear(list(otu_ps), method = "spearman", prv_cut = 0.1)
+# Cannot use SECOM as not enough co-occurrences
+
+
+otu_abund_wide_info_01 <- otu_abund_wide_info %>% select(X1, starts_with("90_")) %>% 
+  pivot_longer(-X1) %>% 
+  mutate(value = value > 0) %>% 
+  pivot_wider(names_from = name, values_from = value) 
+
+otu_abund_wide_info_abund <- otu_abund_wide_info %>% select(X1, starts_with("90_")) %>% 
+  pivot_longer(-X1) %>% 
+  pivot_wider(names_from = name, values_from = value) 
+pairs(otu_abund_wide_info_abund %>% select(-X1))
+
+normalized_mutualInfo <- tibble()
+for (i in 2:(ncol(otu_abund_wide_info_01)-1)){
+  print(paste(i, "of", ncol(otu_abund_wide_info_01)))
+  for (j in (i+1):ncol(otu_abund_wide_info_01)){
+    otu_abund_wide_info_01_temp <- otu_abund_wide_info_01 %>% select(all_of(c(i,j))) 
+    otu_abund_wide_info_01_temp$rs <- rowSums(otu_abund_wide_info_01_temp) 
+    #otu_abund_wide_info_01_temp <- otu_abund_wide_info_01_temp %>% filter(rs > 0) %>% select(-rs)
+    
+    normMutualInfo_Pres <- mutinformation(otu_abund_wide_info_01_temp[1],otu_abund_wide_info_01_temp[2]) / sqrt(entropy(otu_abund_wide_info_01_temp[1]) * entropy(otu_abund_wide_info_01_temp[2]))
+    #normMutualInfo_Abu <- mutinformation(otu_abund_wide_info_abund[i],otu_abund_wide_info_abund[j]) / sqrt(entropy(otu_abund_wide_info_abund[i]) * entropy(otu_abund_wide_info_abund[j]))
+    
+    normalized_mutualInfo <- normalized_mutualInfo %>% bind_rows(tibble(ASV_query = colnames(otu_abund_wide_info_01[i]),
+                                                                        ASV_target = colnames(otu_abund_wide_info_01[j]),
+                                                                       # normMutualInfo_Abu = normMutualInfo_Abu,
+                                                                        normMutualInfo_Pres = normMutualInfo_Pres))
+  }
+}
+write_tsv(normalized_mutualInfo, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_normalized_mutualInfo.tsv"))
+summary(normalized_mutualInfo)
+# normMutualInfo_Pres
+# Min.   :2.000e-08  
+# 1st Qu.:1.206e-04  
+# Median :4.429e-04  
+# Mean   :1.823e-03  
+# 3rd Qu.:1.147e-03  
+# Max.   :9.588e-02 
+
+mcc_otus <- tibble()
+for (i in 2:(ncol(otu_abund_wide_info_01)-1)){
+  print(paste(i, "of", ncol(otu_abund_wide_info_01)))
+  for (j in (i+1):ncol(otu_abund_wide_info_01)){
+    otu_abund_wide_info_01_temp <- otu_abund_wide_info_01 %>% select(all_of(c(i,j))) 
+    otu_abund_wide_info_01_temp$rs <- rowSums(otu_abund_wide_info_01_temp) 
+    #otu_abund_wide_info_01_temp <- otu_abund_wide_info_01_temp %>% filter(rs > 0) %>% select(-rs)
+    asv1 <- otu_abund_wide_info_01_temp %>% select(all_of(1)) %>% pull()
+    asv2 <- otu_abund_wide_info_01_temp %>% select(all_of(2)) %>% pull()
+    
+    
+    mcc <- mltools::mcc(asv1,asv2) 
+    
+    mcc_otus <- mcc_otus %>% bind_rows(tibble(asv1 = colnames(otu_abund_wide_info_01[i]),
+                                              asv2 = colnames(otu_abund_wide_info_01[j]),
+                                              mcc = mcc))
+  }
+}
+write_tsv(mcc_otus, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_mcc_otus.tsv"))
+summary(mcc_otus)
+
+cramersV_otus <- tibble()
+for (i in 2:(ncol(otu_abund_wide_info_01)-1)){
+  print(paste(i, "of", ncol(otu_abund_wide_info_01)))
+  for (j in (i+1):ncol(otu_abund_wide_info_01)){
+    otu_abund_wide_info_01_temp <- otu_abund_wide_info_01 %>% select(all_of(c(i,j))) 
+    otu_abund_wide_info_01_temp$rs <- rowSums(otu_abund_wide_info_01_temp) 
+    #otu_abund_wide_info_01_temp <- otu_abund_wide_info_01_temp %>% filter(rs > 0) %>% select(-rs)
+    asv1 <- otu_abund_wide_info_01 %>% select(all_of(1)) %>% pull()
+    asv2 <- otu_abund_wide_info_01 %>% select(all_of(2)) %>% pull()
+    chi2 <- chisq.test(asv1, asv2)
+    cramersV <- confintr::cramersv(chi2)
+    
+    cramersV_otus <- cramersV_otus %>% bind_rows(tibble(asv1 = colnames(otu_abund_wide_info_01[i]),
+                                              asv2 = colnames(otu_abund_wide_info_01[j]),
+                                              cramersV = cramersV))
+  }
+}
+write_tsv(cramersV_otus, paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_cramersV_otus.tsv"))
+summary(mcc_otus)
+```
+
+
+
+```{r}
+tree <- read.tree(paste0(data_dir,"/phylogeneticTrees/msa_softcore_protein_withOutgroup_Concatenator/iTOL_figure/Legionome_metadata_tree_rooted.treefile"))
+
+phylodist <- as_tibble(cophenetic.phylo(tree)) %>% 
+  mutate(query = row.names(cophenetic.phylo(tree))) %>% 
+  pivot_longer(-query, values_to = "phylodist", names_to = "target") %>% 
+  filter(!(query == "Coxiella_burnetii" | target == "Coxiella_burnetii"))
+
+phylodist_species <- phylodist %>% 
+  left_join(LegioInfo_16S_species %>% dplyr::select(legio_id, species_clust) %>% dplyr::rename(query = legio_id, query.species_clust = species_clust)) %>% 
+  left_join(LegioInfo_16S_species %>% dplyr::select(legio_id, species_clust) %>% dplyr::rename(target = legio_id, target.species_clust = species_clust))
+
+otus_cor_long_species <- otus_cor_long %>% 
+  dplyr::rename(query = var1, target = var2) %>% 
+  left_join(mmseqs_res_ref %>% mutate(species_cluster = word(X1, 2, sep = "__")) %>% select(X2, species_cluster) %>% mutate(query = gsub("MAPv3;","", X2)) %>% dplyr::rename(query.species_clust = species_cluster)) %>% 
+  left_join(mmseqs_res_ref %>% mutate(species_cluster = word(X1, 2, sep = "__")) %>% select(X2, species_cluster) %>% mutate(target = gsub("MAPv3;","", X2)) %>% ungroup() %>% select(-X2) %>% dplyr::rename(target.species_clust = species_cluster))
+
+otus_cor_long_species_phylo <- otus_cor_long_species %>% 
+  left_join(phylodist_species, by = c("query.species_clust", "target.species_clust")) %>% 
+  filter(query.species_clust != target.species_clust) #%>% filter(phylodist < 0.4)
+
+otus_cor_long_species_phylo %>% 
+  ggplot(aes(phylodist, cor)) +
+  geom_point() +
+  labs(y = "Relative abundance correlation [-]", x = "Phylogenetic distance [-]")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/Legionome_OTUs_correlation_vs_phylodist.pdf", dpi = 600)
+
+
+cor.test(otus_cor_long_species_phylo$phylodist, otus_cor_long_species_phylo$cor, method = "spearman") #rho = -0.26, pval = 0
+
+## Filtering phylodist < 0.4 (i.e., the more linear part of the trend)
+# 	Spearman's rank correlation rho
+# 
+# data:  otus_cor_long_species_phylo$phylodist and otus_cor_long_species_phylo$cor
+# S = 301574218, p-value = 0.01093
+# alternative hypothesis: true rho is not equal to 0
+# sample estimates:
+#         rho 
+# -0.07375422 
+```
+
+```{r}
+otus_cor_long <- read_tsv(paste0(data_dir, "/MicrobeAtlas_analysis_files/Legionome_MicrobeAtlas_OTUs_correlations.tsv"))
+otus_cor_long_KEGGclust <- otus_cor_long %>% 
+  mutate(KEGGclust = case_when(str_detect(var1, "80117|463|5934|4277") & str_detect(var2, "80117|463|5934|4277") ~ "6",
+                               str_detect(var1, "134516|124684") & str_detect(var2, "134516|124684") ~ "7",
+                               TRUE ~ "Other"))
+
+
+otus_cor_long_KEGGclust %>% 
+  filter(p < 0.05 & var1 != var2) %>% 
+  filter(str_detect(var1, "80117|463|5934|4277") | str_detect(var2, "80117|463|5934|4277") ) %>% 
+  ggplot(aes(KEGGclust, cor, fill = KEGGclust)) +
+  geom_boxplot(outlier.size = 0.1) +
+  scale_fill_manual(values = c("aquamarine", "grey")) + 
+  labs(y = "Environmental prevalence similarity [-]", x = "Metabolic cluster") +
+  theme(legend.position = "none")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/MicrobeAtlas_analysis/MicrobeAtlas_OTUs_envPrevalence_KEGGcluster_vertical.pdf", dpi = 600, height = 7.3, width = 5)
+
+otus_cor_long_KEGGclust %>% 
+  filter(p < 0.05 & var1 != var2) %>% 
+  filter(str_detect(var1, "80117|463|5934|4277") | str_detect(var2, "80117|463|5934|4277") ) %>% 
+  rstatix::t_test(cor ~ KEGGclust, alternative = "greater")
+
+###
+normalized_mutualInfo_KEGGclust <- normalized_mutualInfo %>% 
+  mutate(KEGGclust = case_when(str_detect(ASV_query, "80117|463|5934|4277") & str_detect(ASV_target, "80117|463|5934|4277") ~ "6",
+                               str_detect(ASV_query, "134516|124684") & str_detect(ASV_target, "134516|124684") ~ "7",
+                               TRUE ~ "Other"))
+
+normalized_mutualInfo_KEGGclust %>% 
+  filter(str_detect(ASV_query, "80117|463|5934|4277") | str_detect(ASV_target, "80117|463|5934|4277") ) %>% 
+  ggplot(aes(KEGGclust, normMutualInfo_Pres)) +
+  scale_y_log10() +
+  geom_boxplot()
+
+normalized_mutualInfo_KEGGclust %>% 
+  filter(str_detect(ASV_query, "80117|463|5934|4277") | str_detect(ASV_target, "80117|463|5934|4277") ) %>% 
+  rstatix::t_test(normMutualInfo_Pres ~ KEGGclust, alternative = "greater")
+
+
+###
+mcc_otus_KEGGclust <- mcc_otus %>% 
+  mutate(KEGGclust = case_when(str_detect(asv1, "80117|463|5934|4277") & str_detect(asv2, "80117|463|5934|4277") ~ "6",
+                               str_detect(asv1, "134516|124684") & str_detect(asv2, "134516|124684") ~ "7",
+                               TRUE ~ "Other"))
+
+mcc_otus_KEGGclust %>% 
+  filter(str_detect(asv1, "80117|463|5934|4277") | str_detect(asv2, "80117|463|5934|4277") ) %>% 
+  ggplot(aes(KEGGclust, mcc)) +
+  #scale_y_log10() +
+  geom_boxplot()
+
+mcc_otus_KEGGclust %>% 
+  filter(str_detect(asv1, "80117|463|5934|4277") | str_detect(asv2, "80117|463|5934|4277") ) %>% 
+  # group_by(KEGGclust) %>% 
+  # sample_n(10) %>% 
+  # ungroup() %>% 
+  rstatix::t_test(mcc ~ KEGGclust, alternative = "greater", detailed = TRUE)
+
+###
+cramersV_otus_KEGGclust <- cramersV_otus %>% 
+  mutate(KEGGclust = case_when(str_detect(asv1, "80117|463|5934|4277") & str_detect(asv2, "80117|463|5934|4277") ~ "6",
+                               str_detect(asv1, "134516|124684") & str_detect(asv2, "134516|124684") ~ "7",
+                               TRUE ~ "Other"))
+
+cramersV_otus_KEGGclust %>% 
+  filter(str_detect(asv1, "80117|463|5934|4277") | str_detect(asv2, "80117|463|5934|4277") ) %>% 
+  ggplot(aes(KEGGclust, cramersV)) +
+  scale_y_log10() +
+  geom_boxplot()
+
+cramersV_otus_KEGGclust %>% 
+  filter(str_detect(asv1, "80117|463|5934|4277") | str_detect(asv2, "80117|463|5934|4277") ) %>% 
+  # group_by(KEGGclust) %>% 
+  # sample_n(10) %>% 
+  # ungroup() %>% 
+  mutate(cramersV_log = log10(cramersV)) %>% 
+  rstatix::t_test(cramersV_log ~ KEGGclust, alternative = "greater", detailed = TRUE)
+```

@@ -1,0 +1,336 @@
+---
+title: "Unique protein families"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ape)
+library(ciTools)
+theme_set(theme_classic(base_size = 16))
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(genomovar_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, genomovar_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster_bestConcordance, genus_cluster_literature)
+
+
+genes_pres_abs_raw <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/gene_presence_absence.Rtab"))
+
+eggnog_annotation_files <- list.files(paste0(data_dir, "eggNOG_annotations/"), pattern = "annotations$", recursive = TRUE, full.names = TRUE)
+eggnog_annotation <- read_tsv(eggnog_annotation_files, id = "filename", comment = "##")
+eggnog_annotation <- eggnog_annotation %>% mutate(legio_id = gsub("_eggNOG", "", word(filename, 10, sep = ("/")))) %>% select(-filename) %>% relocate(legio_id)
+
+tree <- read.tree(paste0(data_dir,"phylogeneticTrees/SUPERMATRIX.partitions.new.nex.LegioID.treefile"))
+```
+```{r}
+organisms_stat <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/organisms_statistics.tsv"), comment = "#")
+organisms_stat <- organisms_stat %>% left_join(metadata_red, by = c("organism" = "legio_id")) 
+
+organisms_stat %>% pivot_longer(c(nb_persistent_families, nb_shell_families, nb_cloud_families)) %>% 
+  mutate(name = factor(name, labels = c("nb_shell_families", "nb_cloud_families", "nb_persistent_families"))) %>% 
+  ggplot(aes(value/nb_families, organism, fill = name)) +
+  geom_col() + facet_wrap(~genus_cluster_bestConcordance, scales = "free_y")
+
+organisms_stat %>% mutate(perc_cloud = nb_cloud_families/nb_families,
+                          perc_softcore_genes = nb_soft_core_genes/nb_genes) %>% view()
+# Cloud gene families make up between 34% and 91% of total gene families
+organisms_stat %>% mutate(frac_core = nb_soft_core_genes/nb_genes) %>% 
+  ggplot(aes(frac_core, fill = isolated)) +
+  geom_histogram()
+organisms_stat %>% mutate(frac_core = nb_soft_core_genes/nb_genes) %>% group_by(isolated)%>% filter(frac_core == max(frac_core) | frac_core == min(frac_core))
+
+organisms_stat %>% filter(genus_cluster_bestConcordance == 1) %>% #group_by(genus_cluster_literature) %>% summarise(n = n())
+  ggplot(aes(nb_families, nb_cloud_families, col = as.factor(genus_cluster_literature))) +
+  geom_point()
+# The problem with the definition of gene families this way is that genus)_cluster 1 (and especially genus_cluster_lit 28) dominate the pangenome and so the definition of the partitions is depending on this: genus_cluster_lit is the most abundant coesive clade so its genes will tend to be more often be classified as shell or persistent, rather than cloud
+
+# Let's calculate things manually
+```
+```{r}
+persistent_genes <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/partitions/persistent.txt"), col_names = FALSE) %>% dplyr::rename(gene_family = X1) %>% mutate(partition = "Persistent")
+shell_genes <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/partitions/shell.txt"), col_names = FALSE) %>% dplyr::rename(gene_family = X1) %>% mutate(partition = "Shell")
+cloud_genes <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/partitions/cloud.txt"), col_names = FALSE) %>% dplyr::rename(gene_family = X1) %>% mutate(partition = "Cloud")
+
+gene_families_tot <- bind_rows(persistent_genes, shell_genes, cloud_genes)
+gene_families_tot <- gene_families_tot %>% left_join(eggnog_annotation, by = c("gene_family" = "#query"))
+
+gene_families_tot_COG <- gene_families_tot %>% group_by(partition) %>% 
+  mutate(n_genes_partition = n(), 
+         COG_category = ifelse(is.na(COG_category), "-", COG_category)) %>% 
+  separate_longer_position(COG_category, 1) %>% 
+  group_by(partition, COG_category) %>% 
+  summarise(n_genes_in_partition_COG = n(), 
+            n_genes_partition = unique(n_genes_partition), 
+            perc = n_genes_in_partition_COG/n_genes_partition)
+
+gene_families_tot_COG %>% 
+  mutate(Partition = factor(partition, levels = c("Persistent", "Shell", "Cloud")),
+         COG_category = fct_relevel(as.factor(COG_category), "-", after = Inf)) %>% 
+  ggplot(aes(COG_category, perc*100, fill = Partition)) +
+  geom_col(position = position_dodge(preserve = "single")) +
+  labs(x = "COG category") +
+  scale_y_sqrt("Percentage of gene families [%]", breaks = c(0, 2.5, 10, 20, 40, 60))#+
+  #scale_y_log10()#continuous(trans = scales::transform_pseudo_log())
+# Most Shell and Cloud genes do not have any annotations
+```
+
+# ppanggolin clusters are affected by phylogenetic structuring and so not good in case of unbalanced trees like this
+# So better to keep the usual partitions
+
+```{r total gene families}
+genes_tot <- genes_pres_abs_raw %>% pivot_longer(-Gene) %>% 
+  group_by(name) %>% 
+  summarise(tot_genes = sum(value)) %>% 
+  dplyr::rename(legio_id = name)
+```
+
+```{r}
+softcore_genes <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/partitions/soft_core.txt"), col_names = FALSE) %>% dplyr::rename(gene_family = X1) %>% mutate(partition = "softcore")
+
+softcore_genes_anno <- softcore_genes %>% left_join(eggnog_annotation, by = c("gene_family" = "#query"))
+
+softcore_genes_anno %>% ggplot(aes(COG_category)) +geom_bar()
+```
+
+```{r genes unique in genomes}
+genes_pres_abs <- genes_pres_abs_raw %>%
+  mutate(sum = rowSums(across(where(is.numeric)), na.rm=TRUE))
+
+genes_pres_abs_only1genome <- genes_pres_abs %>% filter(sum == 1) %>% 
+  select(-sum) %>% 
+  pivot_longer(-Gene) %>% filter(value == 1)
+
+genes_unique <- genes_pres_abs_only1genome %>% group_by(name) %>% summarise(unique_genes_genome = n())%>% 
+  dplyr::rename(legio_id = name)
+
+genes_pres_abs_only1genome %>% 
+  left_join(eggnog_annotation, by = c("Gene" = "#query"))
+# In most cases there are no eggnog annotations, so useless to check them
+```
+
+```{r genes unique in species}
+genes_pres_abs_species_long <- genes_pres_abs_raw %>% pivot_longer(-Gene) %>% 
+  dplyr::rename(legio_id = name) %>% 
+  left_join(metadata_red %>% select(legio_id, species_cluster))
+
+genes_pres_abs_species_long <- genes_pres_abs_species_long %>% 
+  group_by(species_cluster, Gene) %>% 
+  summarise(value_sum = sum(value))
+genes_pres_abs_species_long <- genes_pres_abs_species_long %>% 
+  mutate(value_sum = as.numeric(value_sum > 0))
+
+genes_pres_abs_species <- genes_pres_abs_species_long %>% pivot_wider(names_from = species_cluster, values_from = value_sum)
+genes_pres_abs_species <- genes_pres_abs_species %>%
+  mutate(sum = rowSums(across(where(is.numeric)), na.rm=TRUE))
+
+genes_pres_abs_only1species <- genes_pres_abs_species %>% filter(sum == 1) %>% 
+  select(-sum) %>% 
+  pivot_longer(-Gene) %>% filter(value == 1)
+genes_unique_species <- genes_pres_abs_only1species %>% group_by(name) %>% summarise(unique_genes_species = n()) %>% 
+  dplyr::rename(species_cluster = name)
+```
+
+```{r}
+# metadata_uniqueGenes <- metadata_red %>% left_join(genes_tot) %>% left_join(genes_unique) %>% left_join(genes_unique_species)
+# metadata_uniqueGenes <- metadata_uniqueGenes %>% 
+#   mutate(genes_genomovar_extra_species = ifelse(unique_genes_genome == unique_genes_species, 0, unique_genes_genome),
+#          unique_genes_species_perc = unique_genes_species/tot_genes,
+#          genes_genomovar_extra_species_perc = genes_genomovar_extra_species/tot_genes)
+# # if a gene is present in only one genome with one species this would be counted twice (one within the species and once within the genome) <- WRONG!
+# 
+# metadata_uniqueGenes %>% 
+#   pivot_longer(c(unique_genes_species, genes_genomovar_extra_species)) %>% 
+#   ggplot(aes(value, legio_id, fill = name)) +
+#   geom_col()
+# # Plot not correct <- see later one from metadata_uniqueGenes_genome_species
+```
+
+```{r}
+genes_only1species_tbl <- tibble()
+for (i in 1:length(unique(metadata_red$species_cluster))){
+  species <- unique(metadata_red$species_cluster)[i]
+  legioids_species <- metadata_red %>% filter(species_cluster == species) %>% pull(legio_id)
+  genes_only1species <- genes_pres_abs %>% select(Gene, all_of(legioids_species), sum) %>% 
+    filter(sum == length(legioids_species)) %>% 
+    filter(sum == rowSums(.[legioids_species]))
+  genes_only1species_tbl <- genes_only1species_tbl %>% bind_rows(tibble(species_cluster = species, n_genes_only1species_allGenomes = nrow(genes_only1species)))
+}
+
+metadata_uniqueGenes_genome_species <- metadata_red %>% left_join(genes_tot) %>% left_join(genes_unique) %>% left_join(genes_only1species_tbl)
+metadata_uniqueGenes_genome_species <- metadata_uniqueGenes_genome_species %>% 
+  mutate(unique_genes_genomovar = ifelse(unique_genes_genome == n_genes_only1species_allGenomes, 0, unique_genes_genome),
+         unique_genes_genomovar_perc = unique_genes_genomovar/tot_genes,
+         n_genes_only1species_allGenomes_perc = n_genes_only1species_allGenomes/tot_genes)
+
+metadata_uniqueGenes_genome_species %>% #filter(genus_cluster_bestConcordance == 1) %>% 
+  pivot_longer(c(unique_genes_genomovar_perc, n_genes_only1species_allGenomes_perc)) %>% 
+  ggplot(aes(value, legio_id, fill = name)) +
+  geom_col() + facet_wrap(~genus_cluster_bestConcordance, scales = "free_y")
+# The very low legioIDs represent species which highly shared genomes (e.g.., the traditional subspecies of L pneumophila, i.e., L fraseri)
+
+
+metadata_uniqueGenes_genome_species %>% #filter(genus_cluster_bestConcordance == 1) %>% 
+  pivot_longer(c(unique_genes_genomovar, n_genes_only1species_allGenomes)) %>% 
+  ggplot(aes(value, legio_id, fill = name)) +
+  geom_col() + facet_wrap(~genus_cluster_bestConcordance, scales = "free_y")
+
+mean(metadata_uniqueGenes_genome_species$n_genes_only1species_allGenomes) # 133 gene families unique per genome
+mean(metadata_uniqueGenes_genome_species$n_genes_only1species_allGenomes_perc) # 5.9% unique genes within each genome
+mean(metadata_uniqueGenes_genome_species$unique_genes_genomovar[metadata_uniqueGenes_genome_species$unique_genes_genomovar >0]) # an extra 39 gene families are present in unique to each genomovar within the species
+mean(metadata_uniqueGenes_genome_species$unique_genes_genomovar_perc[metadata_uniqueGenes_genome_species$unique_genes_genomovar_perc >0]) # an extra 1.4% gene families are present in unique to each genomovar within the species
+
+#write_tsv(metadata_uniqueGenes_genome_species,paste0(data_dir,"ppanggolin_results/Legionome_allGenomes_percID30_qCov65/unique_genesFamilies_genomovar_species.tsv"))
+```
+
+```{r load previosly calculated unique genes results}
+
+metadata_uniqueGenes_genome_species <- read_tsv(paste0(data_dir,"ppanggolin_results/Legionome_allGenomes/unique_genesFamilies_genomovar_species.tsv"))
+
+
+```
+
+
+```{r genes unique in genus_cluster}
+genes_pres_abs_genus_long <- genes_pres_abs_raw %>% pivot_longer(-Gene) %>% 
+  dplyr::rename(legio_id = name) %>% 
+  left_join(metadata_red %>% select(legio_id, genus_cluster_bestConcordance))
+
+genes_pres_abs_genus_long <- genes_pres_abs_genus_long %>% 
+  group_by(genus_cluster_bestConcordance, Gene) %>% 
+  summarise(value_sum = sum(value))
+genes_pres_abs_genus_long <- genes_pres_abs_genus_long %>% 
+  mutate(value_sum = as.numeric(value_sum > 0))
+
+genes_pres_abs_genus <- genes_pres_abs_genus_long %>% pivot_wider(names_from = genus_cluster_bestConcordance, values_from = value_sum)
+genes_pres_abs_genus <- genes_pres_abs_genus %>%
+  mutate(sum = rowSums(across(where(is.numeric)), na.rm=TRUE))
+
+genes_pres_abs_only1genus <- genes_pres_abs_genus %>% filter(sum == 1) %>% 
+  select(-sum) %>% 
+  pivot_longer(-Gene) %>% filter(value == 1)
+genes_unique_genus <- genes_pres_abs_only1genus %>% group_by(name) %>% summarise(unique_genes_genus= n()) %>% 
+  dplyr::rename(genus_cluster_bestConcordance = name)
+genes_tot_genus <- genes_tot %>% left_join(metadata_red) %>% 
+  group_by(genus_cluster_bestConcordance) %>% 
+  summarise(tot_genes_genus = sum(tot_genes)) %>% 
+  mutate(genus_cluster_bestConcordance = as.character(genus_cluster_bestConcordance))
+genes_unique_genus <- genes_unique_genus %>% left_join(genes_tot_genus) %>% 
+  mutate(unique_genes_genus_perc = unique_genes_genus/tot_genes_genus)
+cor.test(log10(genes_unique_genus$tot_genes_genus), genes_unique_genus$unique_genes_genus_perc)
+ggplot(genes_unique_genus, aes(log10(tot_genes_genus), unique_genes_genus_perc)) +
+  geom_point() + geom_smooth(method = "lm")
+# Genera 4, 17 and 18 deviate significantly from expectation:
+# - genus 4: composed only of a single unknown species
+# - genus 17: composed only of L israelensis
+# - genus 18: composed only of L geestiana
+```
+
+
+```{r}
+
+phylodist <- as_tibble(cophenetic.phylo(tree)) %>% 
+  mutate(query = row.names(cophenetic.phylo(tree))) %>% 
+  pivot_longer(-query, values_to = "phylodist", names_to = "target")
+  
+phylodist_min <- phylodist %>% filter(target != query) %>% group_by(query) %>% filter(phylodist == min(phylodist))
+phylodist_min2 <- phylodist %>% filter(target != query) %>% group_by(query) %>% mutate(n = n()) %>% summarise(phylodist_min2 = -sort(-phylodist, partial = n - 1)[n-1]) %>% distinct() 
+
+metadata_uniqueGenes_genome_species_phylo <- metadata_uniqueGenes_genome_species %>% 
+  left_join(phylodist_min, by = c("legio_id" = "query")) %>% 
+  left_join(phylodist_min2, by = c("legio_id" = "query")) %>% 
+  left_join(metadata %>% select(legio_id, checkm2.Genome_Size, checkm2.Completeness))
+
+metadata_uniqueGenes_genome_species_phylo %>% 
+  ggplot(aes(phylodist, unique_genes_genome)) + 
+  geom_point() + geom_smooth(method = "lm") +
+  scale_x_log10() + scale_y_log10()
+
+metadata_uniqueGenes_genome_species_phylo %>% 
+  ggplot(aes(checkm2.Genome_Size, unique_genes_genome)) + 
+  geom_point() + geom_smooth(method = "lm") +
+  scale_x_log10() + scale_y_log10()
+
+cor.test(metadata_uniqueGenes_genome_species_phylo$unique_genes_genome, metadata_uniqueGenes_genome_species_phylo$checkm2.Genome_Size, method = "spearman")
+cor.test(metadata_uniqueGenes_genome_species_phylo$unique_genes_genome, metadata_uniqueGenes_genome_species_phylo$checkm2.Genome_Size, method = "spearman")
+
+metadata_uniqueGenes_genome_species_phylo_log <- metadata_uniqueGenes_genome_species_phylo %>% 
+  mutate(phylodist_log = log10(phylodist), 
+         phylodist_min2_log = log10(phylodist_min2), 
+         unique_genes_genome_log = log10(unique_genes_genome))
+
+regr <- lm(unique_genes_genome_log ~ phylodist_log + checkm2.Genome_Size, data = metadata_uniqueGenes_genome_species_phylo_log)
+summary(regr)
+regr_phylo <- lm(unique_genes_genome_log ~ phylodist_log, data = metadata_uniqueGenes_genome_species_phylo_log)
+summary(regr_phylo)
+regr_gsize <- lm(unique_genes_genome_log ~ checkm2.Genome_Size, data = metadata_uniqueGenes_genome_species_phylo_log)
+summary(regr_gsize)
+metadata_uniqueGenes_genome_species_phylo_log <- as_tibble(add_pi(metadata_uniqueGenes_genome_species_phylo_log, regr, alpha = 0.01))
+step(regr, direction = "backward")
+
+
+
+metadata_uniqueGenes_genome_species_phylo_log %>% #filter(legio_id %in% c("Legio01457", "Legio03806", "Legio03922", "Legio04958")) %>% 
+  ggplot(aes(phylodist_log, unique_genes_genome_log)) + 
+  geom_point() + #data = . %>% filter(str_detect(tax_short, "pneu"))
+  #geom_point(aes(phylodist_log, `LPB0.005`), col = "red")+
+  #geom_point(aes(phylodist_log, `UPB0.995`), col = "red")+
+  geom_ribbon(aes(ymin = `LPB0.005`, ymax = `UPB0.995`), col = "lightgrey", alpha = 0.25) +
+  labs(x = "Relative phylogenetic distance (log) [-]", y = "Number of unique genes (log) [-]")
+ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/UniqueGenes_vs_phylo.pdf", dpi = 600, width = 10, height = 7)
+  #scale_x_log10() + scale_y_log10()
+
+metadata_uniqueGenes_genome_species_phylo_log %>% 
+  mutate(more_than_pi = unique_genes_genome_log > `UPB0.995`, less_than_pi = unique_genes_genome_log < `LPB0.005`) %>% 
+  filter(more_than_pi | less_than_pi) %>% 
+  select(legio_id, tax_short, more_than_pi, less_than_pi, phylodist, unique_genes_genome, unique_genes_genome_log, `UPB0.995`, `LPB0.005`)
+
+#
+regr_min2 <- lm(unique_genes_genome_log ~ phylodist_log + phylodist_min2_log + checkm2.Genome_Size, data = metadata_uniqueGenes_genome_species_phylo_log)
+summary(regr_min2)
+metadata_uniqueGenes_genome_species_phylo_log_min2 <- as_tibble(add_pi(metadata_uniqueGenes_genome_species_phylo_log, regr_min2, alpha = 0.01))
+metadata_uniqueGenes_genome_species_phylo_log_min2 %>% 
+  mutate(more_than_pi = unique_genes_genome_log > `UPB0.995`, less_than_pi = unique_genes_genome_log < `LPB0.005`) %>% 
+  filter(more_than_pi | less_than_pi) %>% 
+  select(legio_id, tax_short, more_than_pi, less_than_pi, phylodist, unique_genes_genome, unique_genes_genome_log, `UPB0.995`, `LPB0.005`)
+
+metadata_uniqueGenes_genome_species_phylo_log_min2 %>% 
+  ggplot(aes(phylodist_log, unique_genes_genome_log)) + 
+  geom_point() + #data = . %>% filter(str_detect(tax_short, "pneu"))
+  geom_point(aes(phylodist_log, `LPB0.005`), col = "red")+
+  geom_point(aes(phylodist_log, `UPB0.995`), col = "red")
+
+# Even adding the distance second closest genome the results from L. fraseri genomovars does not improve
+```
+
+```{r}
+hgt_files <- list.files(paste0(data_dir, "/hgtector_results/"), full.names = TRUE)
+
+hgt <- read_tsv(hgt_files, id = "filename", col_names = FALSE)
+hgt <- hgt %>% mutate(legio_id = word(gsub(paste0(data_dir, "/hgtector_results//"),"",filename), 1, sep = "_"))
+
+hgt_summ <- hgt %>% group_by(legio_id) %>% summarise(hgt = n())
+```
+
+```{r}
+LegioInfo_hgt <- metadata %>% left_join(hgt_summ)
+
+LegioInfo_hgt %>% 
+  ggplot(aes((checkm2.Genome_Size*100/checkm2.Completeness)/10^6, hgt)) +
+  geom_point() +
+  labs(y = "Putative HGT events [-]", x = "Estimated genome size [Mb]")
+#ggsave("/Users/gabriema/PostdocUMIK/Activities/Legionome/Plots/Comparison_genomes/HGT_vs_genomeSize.pdf", dpi = 600, width = 10, height = 7)
+
+cor.test(LegioInfo_hgt$checkm2.Genome_Size*100/LegioInfo_hgt$checkm2.Completeness, LegioInfo_hgt$hgt, method = "spearman")
+
+LegioInfo_hgt <- LegioInfo_hgt %>% mutate(estimated_GenomeSize = checkm2.Genome_Size*100/checkm2.Completeness)
+regr_hgt <- lm(hgt ~ estimated_GenomeSize, data = LegioInfo_hgt)
+
+add_pi(LegioInfo_hgt, regr_hgt)
+# Estimates of L fraseri genomes with lower number of unique genes than expected (Legio03922, Legio03806) fall within bounds
+```

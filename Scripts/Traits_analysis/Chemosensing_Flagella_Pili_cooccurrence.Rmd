@@ -1,0 +1,47 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(survival)
+```
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+LegioInfo <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv")) 
+
+LegioInfo_flag_pil <- read_tsv(paste0(data_dir, "/TXSScan_results/LegioInfo_red_Flagella_Pili.tsv"))
+
+chemotaxis_regulation_summary <- read_tsv(paste0(data_dir, "/Chemotaxis/Chemotaxis_legioid_metadata.tsv"))
+```
+
+```{r}
+LegioInfo_flag_pil_chem <- LegioInfo_flag_pil %>% left_join(chemotaxis_regulation_summary) %>% 
+  mutate(species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  mutate(Flagellum_presence = TXSScan_Flagellum > 0,
+         Pili_presence = TXSScan_T4aP > 0,
+         Chemosensory_flag_presence = chemosensory_flagellar == "CheW-based",
+         Chemosensory_pil_presence = chemosensory_tfp == "CheW-based")
+
+LegioInfo_flag_pil_chem %>% group_by(Chemosensory_pil_presence) %>% summarise(n_species = length(unique(species_cluster)))
+LegioInfo_flag_pil_chem %>% group_by(Chemosensory_flag_presence) %>% summarise(n_species = length(unique(species_cluster)))
+
+Flag_coocc_table <- table(LegioInfo_flag_pil_chem %>% select(Flagellum_presence, Chemosensory_flag_presence))
+Flag_coocc_table
+# Chemosensory for Flag only in 28.8% of cases where a flagella is present
+
+Pil_coocc_table <- table(LegioInfo_flag_pil_chem %>% select(Pili_presence, Chemosensory_pil_presence))
+Pil_coocc_table
+# Chemosensory for T4P only in 28.8% of cases where a pilus is present
+```
+
+```{r}
+
+summary(glm( Flagellum_presence ~Chemosensory_flag_presence, data = LegioInfo_flag_pil_chem, family = binomial) )
+
+summary(glm(Pili_presence ~ Chemosensory_pil_presence, data = LegioInfo_flag_pil_chem, family = binomial))
+```

@@ -1,0 +1,121 @@
+---
+title: "downloadedGenomes filtering"
+output: html_notebook
+---
+
+Merge genome LegioID_genomesTableNR with downloaded genomes QC carried out using CheckM2, GUNC and GTDB-Tk
+
+```{r import-data&merge}
+library(tidyverse)
+
+main_folder <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/"
+
+LegioID_genomesTableNR_info <- read_delim(paste0(main_folder,"Data/LegioID_genomesTableNR.tsv"), 
+    delim = "\t", escape_double = FALSE, 
+    col_types = cols(accession_gem = col_character(), 
+        accession_mgnify = col_character(), 
+        accession_oceandna = col_character(), 
+        buck2021_bin_id = col_character(), 
+        zhou2022_bin_id = col_character(), 
+        pintolab_dw_bin_id = col_character(), 
+        environmental_medium = col_character(), 
+        geographic_origin = col_character(), 
+        biome = col_character()), trim_ws = TRUE)
+
+checkm2_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_checkm2.quality_report.tsv"))
+gunc_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_GUNC.progenomes_2.1.maxCSS_level.tsv"), na = "nan")
+gtdbtk_results <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_gtdbtk.bac120.summary.tsv"))
+
+# Extract LegioID from tables and rename columns
+colnames(checkm2_results) <- paste0("checkm2.", colnames(checkm2_results))
+checkm2_results <- checkm2_results %>% mutate(legio_id = word(checkm2.Name, sep = "_", start = 1)) %>% select(-checkm2.Name)
+colnames(gunc_results) <- paste0("gunc.", colnames(gunc_results))
+gunc_results <- gunc_results %>% mutate(legio_id = word(gunc.genome, sep = "_", start = 1)) %>% select(-gunc.genome)
+colnames(gtdbtk_results) <- paste0("gtdbtk.", colnames(gtdbtk_results))
+gtdbtk_results <- gtdbtk_results %>% mutate(legio_id = word(gtdbtk.user_genome, sep = "_", start = 1)) %>% select(-gtdbtk.user_genome)
+
+
+# Merge tables based on LegioID
+LegioID_genomesTableNR <- LegioID_genomesTableNR_info %>% left_join(checkm2_results) %>% left_join(gunc_results) %>% left_join(gtdbtk_results)
+```
+
+Remove genomes without QC info (missing genomes)
+```{r remove-missing-genomes}
+
+LegioID_genomesTableNR_filtered_QCed <- LegioID_genomesTableNR %>% filter((!(is.na(checkm2.Completeness) | is.na(gunc.n_genes_called) | is.na(gtdbtk.classification))))
+
+
+```
+
+Remove genomes which do not belong to f\_\_Legionellaceae (following GTDB-Tk classification)
+```{r remove-misclassified-genomes}
+
+LegioID_genomesTableNR_filtered_QCed_tax <- LegioID_genomesTableNR_filtered_QCed %>% filter(str_detect(gtdbtk.classification, "f__Legionellaceae;"))
+
+```
+
+GUNC chimera removal
+```{r remove-gunc-css}
+
+CSS_thresh <- 0.45
+
+# Remove genomes with CSS higher threshold
+# Expection: do not remove genomes from RefSeq and ATCC whose CSS score is higher than 0.45 when evaluated at the genus level since this is an artifact of having g__Fluoribacter
+LegioID_genomesTableNR_filtered_QCed_tax_gunc <- LegioID_genomesTableNR_filtered_QCed_tax %>% 
+  filter((gunc.clade_separation_score <= CSS_thresh | 
+            is.na(gunc.pass.GUNC)) | 
+           (gunc.taxonomic_level == "genus" & str_detect(accession_assembly, "GCF") | 
+              (gunc.taxonomic_level == "genus" & (source == "ATCC" | source == "SangerInstitute"))))
+# Retain only genomes with CSS below threshold 
+
+```
+
+
+CheckM2 filtering
+```{r remove-checkm2-contamination-completeness}
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont <- LegioID_genomesTableNR_filtered_QCed_tax_gunc %>% 
+  filter(checkm2.Contamination <= 5)
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont %>% 
+  filter(checkm2.Completeness >= 85) # Selection threshold plot in `downloadedGenomes_QC` script
+
+```
+
+
+Add manually refined genomes
+```{r add-manually-refined-genomes}
+
+gunc_manualRef <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_manualRefinement_GUNC.progenomes_2.1.maxCSS_level.tsv"), na = "nan") 
+checkm2_manualRef <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_manualRefinement_checkm2.quality_report.tsv")) 
+gtdbtk_manualRef <- read_tsv(paste0(main_folder,"Data/downloadedGenomes_manualRefinement_gtdbtk.bac120.summary.tsv")) 
+
+colnames(checkm2_manualRef) <- paste0("checkm2.", colnames(checkm2_manualRef))
+checkm2_manualRef <- checkm2_manualRef %>% mutate(legio_id = word(checkm2.Name, sep = "_", start = 1)) %>% select(-checkm2.Name)
+colnames(gunc_manualRef) <- paste0("gunc.", colnames(gunc_manualRef))
+gunc_manualRef <- gunc_manualRef %>% mutate(legio_id = word(gunc.genome, sep = "_", start = 1)) %>% select(-gunc.genome)
+colnames(gtdbtk_manualRef) <- paste0("gtdbtk.", colnames(gtdbtk_manualRef))
+gtdbtk_manualRef <- gtdbtk_manualRef %>% mutate(legio_id = word(gtdbtk.user_genome, sep = "_", start = 1)) %>% select(-gtdbtk.user_genome)
+
+results_manualRef <- gunc_manualRef %>% left_join(checkm2_manualRef, by = "legio_id") %>% left_join(gtdbtk_manualRef, by = "legio_id")
+results_manualRef_passed <- results_manualRef %>% filter((gunc.clade_separation_score <= 0.45 & checkm2.Completeness >= 85 & checkm2.Contamination <= 5) | str_detect(legio_id, "Legio03643")) 
+results_manualRef_passed_legio_id <- results_manualRef_passed %>% pull(legio_id)
+
+results_manualRef_toAdd <- LegioID_genomesTableNR_info %>% filter(legio_id %in% results_manualRef_passed_legio_id) %>% left_join(results_manualRef_passed) %>% 
+  mutate(assembly_name = ifelse(str_detect(legio_id, "Legio03643"), assembly_name, paste0(assembly_name,"_manualRef"))) # Legio03643 taken as is (no issues found with manual checking)
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl %>% bind_rows(results_manualRef_toAdd) %>% 
+  arrange(legio_id)
+
+```
+
+```{r export-result}
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef <- LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef %>% select(-c(gtdb_taxonomy,num_assemblies))
+write_tsv(LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef, paste0(main_folder,"Data/LegioID_genomesTableNR_QCfiltered_manRef.tsv"))
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef %>% 
+  ggplot(aes(checkm2.Completeness, checkm2.Contamination, col = gunc.clade_separation_score)) +
+  geom_point()
+
+LegioID_genomesTableNR_filtered_QCed_tax_gunc_checkm2_cont_compl_manualRef %>% 
+  group_by(gtdbtk.classification) %>% summarise(n_genomes = n())
+```

@@ -1,0 +1,62 @@
+---
+title: "Check T4SS detected by TXSSscan vs Dot/Icm and CONJscan"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(ape)
+library(usedist)
+theme_set(theme_classic(base_size = 16))
+```
+
+
+```{r}
+data_dir <- "/Users/gabriema/PostdocUMIK/Activities/Legionome/Data/"
+
+metadata <- read_tsv(paste0(data_dir,"LegioID_legionomePangenome_genus.tsv"))
+metadata_red <- metadata %>% mutate(tax_short = word(gtdbtk.classification, start = 6, end = 7, sep = ";"),
+                                      species_cluster = word(strain_cluster, start = 1, end = 2, sep = "_")) %>% 
+  select(legio_id, species_cluster, strain_cluster, tax_short, gtdbtk.classification, checkm2.Completeness, species_info, isolated, genus_cluster)
+
+TXSScan_res_files <- list.files(paste0(data_dir, "/TXSScan_results/Best_solution"), full.names = TRUE)
+TXSScan_res <- read_tsv(TXSScan_res_files, id = "filename", comment = "#")
+TXSScan_res_T6SS <- TXSScan_res %>% filter(str_detect(model_fqn, "T6SSi"))
+```
+
+```{r}
+
+TXSScan_res_T6SS_positives <- TXSScan_res_T6SS %>% 
+  group_by(filename) %>% 
+  summarise(n_T6SS_prots = n()) %>% 
+  filter(n_T6SS_prots >= 9) %>% 
+  mutate(legio_id = word(word(filename, 11, sep = "/"), 1, sep = "_"))
+
+```
+
+```{bash}
+grep "The quorum of mandatory genes required (11) is not reached: 9" /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/TXSScan_results/Rejected_candidate_systems/*.txt | awk -F/ '{print $10}' | awk -F_ '{print $1}' > /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/TXSScan_results/T6SS_possible_9proteins.txt
+
+grep "The quorum of mandatory genes required (11) is not reached: 10" /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/TXSScan_results/Rejected_candidate_systems/*.txt | awk -F/ '{print $10}' | awk -F_ '{print $1}' > /Users/gabriema/PostdocUMIK/Activities/Legionome/Data/TXSScan_results/T6SS_possible_10proteins.txt
+```
+
+```{r}
+TXSScan_9proteins <- read_csv(paste0(data_dir, "/TXSScan_results/T6SS_possible_9proteins.txt"),  col_names = FALSE)
+TXSScan_10proteins <- read_csv(paste0(data_dir, "/TXSScan_results/T6SS_possible_10proteins.txt"),  col_names = FALSE)
+
+TXSScan_falseNegative_truePositives <- bind_rows(TXSScan_9proteins, TXSScan_10proteins) %>% distinct() %>% pull(X1)
+# Besides false negatives also the true positives will be detected (as not best solutions)
+
+```
+
+```{r}
+
+metadata_red_T6SS <- metadata_red %>% 
+  mutate(T6SS_present = legio_id %in% TXSScan_res_T6SS_positives$legio_id,
+         T6SS_present = ifelse(legio_id %in% TXSScan_falseNegative_truePositives, TRUE, T6SS_present))
+
+write_tsv(metadata_red_T6SS, paste0(data_dir, "/TXSScan_results/T6SS_TXSScan_manualCuration.tsv"))
+```
+
+
